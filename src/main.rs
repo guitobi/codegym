@@ -2,6 +2,7 @@ mod coach;
 mod git;
 mod graph;
 mod progress;
+mod syntax;
 
 use coach::{Coach, Question};
 use git::StudyMode;
@@ -309,6 +310,24 @@ fn run() -> Result<(), String> {
                 0
             }
             Answer::Response(answer) => {
+                if matches!(&evidence.mode, StudyMode::Practice)
+                    && let Some(report) = syntax::check(&q.source_path, &answer)
+                {
+                    if report.issues.is_empty() {
+                        println!("Локальна TS/TSX перевірка: синтаксичних помилок не знайдено.");
+                    } else {
+                        println!("Локальна TS/TSX перевірка: можливі синтаксичні помилки:");
+                        for issue in &report.issues {
+                            println!("  рядок {}: {}", issue.line, issue.kind);
+                        }
+                        println!(
+                            "Це перевірка синтаксису, не TypeScript typecheck і не запуск тестів."
+                        );
+                    }
+                    if report.checked_as_block {
+                        println!("Фрагмент перевірено як тіло функції.");
+                    }
+                }
                 println!("Оцінюю відповідь...");
                 let result = coach.evaluate(q, &snippet, &answer)?;
                 println!("\nОцінка: {}/5", result.score);

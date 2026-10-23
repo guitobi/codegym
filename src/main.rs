@@ -4,6 +4,7 @@ mod graph;
 mod imports;
 mod progress;
 mod runner;
+mod session;
 mod syntax;
 mod ui;
 
@@ -21,6 +22,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   codegym graph NAME             Покажи TS/TSX граф викликів без AI
   codegym graph NAME --from PATH  Перевір відносні TS/TSX імпорти з PATH
   codegym inspect                Переглянути вибраний контекст без AI
+  codegym feature --fresh        Почати нове заняття, відкинувши незавершене
   codegym practice               Самостійно писати код
   codegym review                 Контрольна перевірка без підказок
   codegym progress               Статистика навчання
@@ -62,6 +64,7 @@ struct Options {
     model: Option<String>,
     questions: usize,
     page: Option<usize>,
+    fresh: bool,
     help: bool,
 }
 
@@ -77,6 +80,7 @@ fn args(items: &[String]) -> Result<Options, String> {
         model: None,
         questions: 5,
         page: None,
+        fresh: false,
         help: false,
     };
     let mut i = 0;
@@ -84,6 +88,7 @@ fn args(items: &[String]) -> Result<Options, String> {
     while i < items.len() {
         match items[i].as_str() {
             "help" | "-h" | "--help" => result.help = true,
+            "--fresh" => result.fresh = true,
             "feature" | "practice" | "review" | "progress" | "inspect" if !command => {
                 match items[i].as_str() {
                     "practice" => result.mode = StudyMode::Practice,
@@ -301,18 +306,61 @@ fn run() -> Result<(), String> {
     if opts.page.is_some() && matches!(opts.mode, StudyMode::Function(_)) {
         return Err("--page не використовується для function.".into());
     }
+    if opts.fresh && (opts.page.is_some() || opts.inspect) {
+        return Err("--fresh не поєднується з --page або inspect.".into());
+    }
     let branch = git::current_branch(&repo)?;
-    let mode_name = opts.mode.key();
-    let page = opts
+    let mode_name = match &opts.mode {
+        StudyMode::Function(name) => {
+            format!("function:{name}:{}", opts.from.as_deref().unwrap_or(""))
+        }
+        _ => opts.mode.key().to_owned(),
+    };
+    if opts.fresh && !opts.inspect && opts.page.is_none() {
+        session::Session::clear_for(&repo, &branch, &mode_name)?;
+        println!("Старе незавершене заняття скасовано.");
+    }
+    // Explicit --page runs a one-off lesson without overwriting any unfinished
+    // automatic lesson. Inspect never writes/consumes pending sessions.
+    let pending = if opts.page.is_none() && !opts.inspect && !opts.fresh {
+        session::Session::load(&repo, &branch, &mode_name)?
+    } else {
+        None
+    };
+    let mut page = opts
         .page
-        .unwrap_or_else(|| progress.lesson_page(&repo, &branch, mode_name));
-    let evidence = git::gather(
+        .or_else(|| pending.as_ref().map(|s| s.page))
+        .unwrap_or_else(|| progress.lesson_page(&repo, &branch, &mode_name));
+    let mut evidence = git::gather(
         &repo,
         opts.mode,
         opts.base.as_deref(),
         opts.from.as_deref(),
         page,
     )?;
+    let mut signature = if opts.inspect {
+        0
+    } else {
+        session::evidence_signature(&repo, &evidence)?
+    };
+    let mut resumed = pending.filter(|old| old.matches(page, signature));
+    if resumed.is_none()
+        && !opts.inspect
+        && opts.page.is_none()
+        && let Some(stale) = session::Session::load(&repo, &branch, &mode_name)?
+    {
+        stale.clear(&repo)?;
+        page = progress.lesson_page(&repo, &branch, &mode_name);
+        evidence = git::gather(
+            &repo,
+            evidence.mode.clone(),
+            opts.base.as_deref(),
+            opts.from.as_deref(),
+            page,
+        )?;
+        signature = session::evidence_signature(&repo, &evidence)?;
+        println!("Попереднє заняття застаріло — згенерую нове за поточним кодом.");
+    }
     println!(
         "Гілка: {} · база: {} · файлів-кандидатів: {}",
         evidence.branch,
@@ -330,26 +378,43 @@ fn run() -> Result<(), String> {
         println!("Обсяг контексту: {} байтів.", evidence.context.len());
         return Ok(());
     }
-    println!("Генерую {} питань через Codex...", opts.questions);
     let coach = Coach::new(opts.model);
-    let weak_topics = progress.weak_topics(&repo);
-    if !weak_topics.is_empty() {
-        println!("Повторимо слабкі теми: {}", weak_topics.join(", "));
-    }
-    let questions = coach.questions(&evidence, opts.questions, &weak_topics)?;
-    if opts.page.is_none() && !matches!(evidence.mode, StudyMode::Function(_)) {
-        progress.advance_lesson(&repo, &branch, mode_name);
-        progress.save()?;
-    }
+    let mut lesson = if let Some(pending) = resumed.take() {
+        println!(
+            "Відновлено заняття з питання {} із {} — без повторного виклику Codex.",
+            pending.next + 1,
+            pending.questions.len()
+        );
+        pending
+    } else {
+        println!("Генерую {} питань через Codex...", opts.questions);
+        let weak_topics = progress.weak_topics(&repo);
+        if !weak_topics.is_empty() {
+            println!("Повторимо слабкі теми: {}", weak_topics.join(", "));
+        }
+        let questions = coach.questions(&evidence, opts.questions, &weak_topics)?;
+        let lesson = session::Session::new(&repo, &branch, &mode_name, page, signature, questions);
+        if opts.page.is_none() {
+            // Store the pending lesson before advancing its cursor. A crash
+            // before the first answer can still resume without AI work.
+            lesson.save(&repo)?;
+            if !matches!(evidence.mode, StudyMode::Function(_)) {
+                progress.advance_lesson(&repo, &branch, &mode_name);
+                progress.save()?;
+            }
+        }
+        lesson
+    };
     println!(
         "Підготовлено {} питань. Відповідай українською.",
-        questions.len()
+        lesson.questions.len()
     );
     let mut scores = Vec::new();
-    for (index, q) in questions.iter().enumerate() {
+    for index in lesson.next..lesson.questions.len() {
+        let q = &lesson.questions[index];
         ui::question_heading(
             index + 1,
-            questions.len(),
+            lesson.questions.len(),
             &q.topic,
             &q.source_path,
             q.source_line,
@@ -364,7 +429,11 @@ fn run() -> Result<(), String> {
         )?;
         let score = match answer {
             Answer::Quit => {
-                println!("Заняття зупинено. Результати попередніх питань збережено.");
+                if opts.page.is_none() {
+                    println!("Заняття призупинено. Наступний запуск продовжить із цього питання.");
+                } else {
+                    println!("Заняття завершено. Урок з --page не зберігається для відновлення.");
+                }
                 break;
             }
             Answer::Skip => {
@@ -441,6 +510,14 @@ fn run() -> Result<(), String> {
         progress.record(&repo, &q.topic, score);
         progress.save()?;
         scores.push(score);
+        lesson.next = index + 1;
+        if opts.page.is_none() {
+            if lesson.next >= lesson.questions.len() {
+                lesson.clear(&repo)?;
+            } else {
+                lesson.save(&repo)?;
+            }
+        }
     }
     if !scores.is_empty() {
         let sum = scores.iter().map(|s| u32::from(*s)).sum::<u32>();

@@ -233,7 +233,7 @@ impl Coach {
         allowed.sort();
 
         let learning = if matches!(evidence.mode, crate::git::StudyMode::Practice) {
-            "Це практичний режим із РЕАЛЬНИМИ виконуваними тестами! У кожному питанні проси написати самостійну ЧИСТУ JavaScript-функцію (без TS-анотацій типів, імпортів, require, async, Date, мережі, файлової системи, запуску скриптів). Завдання має бути натхнене реальним уривком, але бути самодостатнім. Вкажи точну назву функції, контракт, параметри й очікувані результати. Питання має вимагати ЛИШЕ код цієї функції — не проси одночасно пояснення словами! Поле practice ОБОВ'ЯЗКОВЕ: function_name — точна проста назва функції, tests — 3–5 коректних детермінованих випадків із JSON input (масив аргументів) і JSON expected (очікуване значення). Підбери в тому числі крайні випадки. Перевір подумки кожен expected. Без побічних ефектів. Учень подає весь код function NAME(...) {...} або const NAME = (...) => ...;."
+            "Це практичний режим із РЕАЛЬНИМИ виконуваними тестами! У кожному питанні проси написати самостійну ЧИСТУ JavaScript-функцію (без TS-анотацій типів, імпортів, require, async, Date, мережі, файлової системи, запуску скриптів). Завдання має бути натхнене реальним уривком, але бути самодостатнім. Вкажи точну назву функції, контракт, параметри й очікувані результати. Питання має вимагати ЛИШЕ код цієї функції — не проси одночасно пояснення словами! Поле practice ОБОВ'ЯЗКОВЕ: function_name — точна проста назва функції, tests — 3–5 коректних детермінованих випадків із JSON input (масив аргументів) і JSON expected (очікуване значення). Підбери в тому числі крайні випадки. reference_answer — ТІЛЬКИ самодостатній чистий JavaScript-КОД з функцією practice.function_name БЕЗ Markdown, пояснень та TypeScript-анотацій. Reference answer має пройти ВСІ practice.tests, інакше завдання буде відхилено автоматично. Без побічних ефектів. Учень подає весь код function NAME(...) {...} або const NAME = (...) => ...;."
         } else if matches!(evidence.mode, crate::git::StudyMode::Review) {
             "Це незалежний іспит. Завдання конкретні, без навідних пояснень."
         } else {
@@ -247,7 +247,7 @@ impl Coach {
 Раніше учень мав труднощі з темами: {}.
 Якщо є такі теми, включи принаймні одне питання на них, якщо це обґрунтовано кодом.
 Правила:
-- Усі питання, підказки та еталонні відповіді УКРАЇНСЬКОЮ.
+- Усі питання й підказки УКРАЇНСЬКОЮ; у практиці reference_answer — тільки JavaScript-код, в інших режимах — українське пояснення.
 - Кожне питання вказує на справжній source_path з дозволеного списку та номер рядка.
 - Питай про ПРИЧИНУ, зв'язки, місця виклику, рух даних, транзакції, побічні ефекти, архітектуру.
 - Якщо місце виклику не видно з уривків, не стверджуй, що знаєш його. Можна запитати, як його знайти.
@@ -273,39 +273,81 @@ impl Coach {
             evidence.context
         );
         let practice_mode = matches!(evidence.mode, crate::git::StudyMode::Practice);
-        let value = self.codex(
-            &prompt,
-            if practice_mode {
-                PRACTICE_SCHEMA
-            } else {
-                QUESTIONS_SCHEMA
-            },
-        )?;
-        let parsed: QuestionBatch = serde_json::from_str(&value)
-            .map_err(|error| format!("Codex повернув некоректний JSON запитань: {error}"))?;
-        let mut questions = parsed.questions;
-        questions.truncate(amount);
-        questions
-            .retain(|q| !q.question.trim().is_empty() && !q.reference_answer.trim().is_empty());
-        if questions.is_empty() {
-            return Err("Codex не сформував придатних запитань.".into());
+        let schema = if practice_mode {
+            PRACTICE_SCHEMA
+        } else {
+            QUESTIONS_SCHEMA
+        };
+        let mut correction = String::new();
+        for attempt in 1..=2 {
+            let value = self.codex(&format!("{prompt}\n{correction}"), schema)?;
+            let parsed: QuestionBatch = serde_json::from_str(&value)
+                .map_err(|error| format!("Codex повернув некоректний JSON запитань: {error}"))?;
+            let mut questions = parsed.questions;
+            questions.truncate(amount);
+            match Self::validate_questions(evidence, amount, practice_mode, &mut questions) {
+                Ok(()) => return Ok(questions),
+                Err(reason) if attempt < 2 => {
+                    correction = format!(
+                        "\nУ ПОПЕРЕДНІЙ СПРОБІ ЗНАЙДЕНО ПОМИЛКУ: {reason}. \
+                         Виправ усі завдання, особливо reference_answer і тести. \
+                         Повтори весь набір у правильній схемі JSON."
+                    );
+                }
+                Err(reason) => {
+                    return Err(format!(
+                        "Двічі отримано ненадійні запитання; нічого не показую учню. Причина: {reason}"
+                    ));
+                }
+            }
         }
-        for question in &mut questions {
+        unreachable!()
+    }
+
+    fn validate_questions(
+        evidence: &Evidence,
+        amount: usize,
+        practice_mode: bool,
+        questions: &mut [Question],
+    ) -> Result<(), String> {
+        if questions.len() != amount {
+            return Err(format!(
+                "Очікувалось {amount} запитань, отримано {}",
+                questions.len()
+            ));
+        }
+        for question in questions {
+            if question.question.trim().is_empty() || question.reference_answer.trim().is_empty() {
+                return Err("Порожнє запитання або еталонна відповідь.".into());
+            }
+            if !evidence.valid_location(&question.source_path, question.source_line) {
+                return Err(format!(
+                    "Модель посилається на неіснуючий або недозволений рядок {}:{}.",
+                    question.source_path, question.source_line
+                ));
+            }
             if practice_mode {
                 let task = question
                     .practice
                     .as_ref()
-                    .ok_or("Codex не створив виконувані тест-кейси для практики.")?;
+                    .ok_or("Відсутні тести для практичної вправи.")?;
                 crate::runner::validate(task)?;
+                let result = crate::runner::run(&question.reference_answer, task)
+                    .map_err(|err| format!("Еталонна функція не виконується: {err}"))?;
+                if result.passed() != task.tests.len() {
+                    return Err(format!(
+                        "Еталонне рішення {} пройшло лише {}/{} тестів.",
+                        task.function_name,
+                        result.passed(),
+                        task.tests.len()
+                    ));
+                }
             }
-            let (path, line) = evidence.safe_location(&question.source_path, question.source_line);
-            question.source_path = path;
-            question.source_line = line;
             if question.hint.trim().is_empty() {
                 question.hint = "Прослідкуй, що функція отримує, робить і повертає.".into();
             }
         }
-        Ok(questions)
+        Ok(())
     }
 
     pub fn evaluate(
@@ -407,5 +449,65 @@ mod tests {
         let json = r#"{"questions":[{"topic":"Логіка","question":"Чому?","source_path":"a.ts","source_line":12,"reference_answer":"Тому","hint":"Подумай"}]}"#;
         let got: QuestionBatch = serde_json::from_str(json).unwrap();
         assert_eq!(got.questions.len(), 1);
+    }
+
+    #[test]
+    fn refuses_invented_sources_and_incorrect_reference_tests() {
+        let base = std::env::temp_dir().join(format!(
+            "codegym-evidence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let result = (|| -> Result<(), String> {
+            std::fs::write(base.join("logic.ts"), "export const sum = (a,b) => a+b;\n")
+                .map_err(|e| e.to_string())?;
+            let evidence = Evidence {
+                root: std::fs::canonicalize(&base).map_err(|e| e.to_string())?,
+                branch: "feature".into(),
+                base: "main".into(),
+                context: "".into(),
+                overview: "".into(),
+                paths: ["logic.ts".to_owned()].into_iter().collect(),
+                mode: crate::git::StudyMode::Practice,
+            };
+            let task = crate::runner::Spec {
+                function_name: "sum".into(),
+                tests: vec![
+                    crate::runner::Case {
+                        input: vec![2.into(), 3.into()],
+                        expected: 5.into(),
+                    },
+                    crate::runner::Case {
+                        input: vec![4.into(), 1.into()],
+                        expected: 5.into(),
+                    },
+                ],
+            };
+            let mut questions = vec![Question {
+                topic: "Практика".into(),
+                question: "Напиши sum".into(),
+                source_path: "not-real.ts".into(),
+                source_line: 1,
+                reference_answer: "function sum(a,b){return a+b;}".into(),
+                hint: "Поглянь на знак +".into(),
+                practice: Some(task),
+            }];
+            assert!(Coach::validate_questions(&evidence, 1, true, &mut questions).is_err());
+            questions[0].source_path = "logic.ts".into();
+            questions[0].source_line = 99;
+            assert!(Coach::validate_questions(&evidence, 1, true, &mut questions).is_err());
+            questions[0].source_line = 1;
+            questions[0].reference_answer = "function sum(a,b){return a-b;}".into();
+            assert!(Coach::validate_questions(&evidence, 1, true, &mut questions).is_err());
+            questions[0].reference_answer = "function sum(a,b){return a+b;}".into();
+            Coach::validate_questions(&evidence, 1, true, &mut questions)?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(&base);
+        result.unwrap();
     }
 }

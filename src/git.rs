@@ -53,7 +53,7 @@ impl Evidence {
         let absolute = safe_regular_file(&self.root, path)?;
         let contents = fs::read_to_string(absolute).ok()?;
         let lines = contents.lines().collect::<Vec<_>>();
-        if lines.is_empty() {
+        if lines.is_empty() || line == 0 || line > lines.len() {
             return None;
         }
         let center = line.saturating_sub(1).min(lines.len() - 1);
@@ -94,16 +94,8 @@ impl Evidence {
         context
     }
 
-    pub fn safe_location(&self, path: &str, line: usize) -> (String, usize) {
-        if self.paths.contains(path)
-            && valid_path(path)
-            && self.display_snippet(path, line).is_some()
-        {
-            (path.to_owned(), line.max(1))
-        } else {
-            let selected = self.paths.iter().min().cloned().unwrap_or_default();
-            (selected, 1)
-        }
+    pub fn valid_location(&self, path: &str, line: usize) -> bool {
+        self.paths.contains(path) && valid_path(path) && self.display_snippet(path, line).is_some()
     }
 }
 

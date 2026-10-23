@@ -22,6 +22,8 @@ pub struct TopicProgress {
 pub struct Store {
     pub version: u32,
     pub topics: BTreeMap<String, TopicProgress>,
+    #[serde(default)]
+    pub lesson_pages: BTreeMap<String, u32>,
 }
 
 fn data_file() -> Result<PathBuf, String> {
@@ -37,6 +39,25 @@ fn data_file() -> Result<PathBuf, String> {
 }
 
 impl Store {
+    fn lesson_key(repo: &Path, branch: &str, mode: &str) -> String {
+        format!("{} | {branch} | {mode}", repo.display())
+    }
+
+    /// Next one-based lesson page. Only generated sessions advance it.
+    pub fn lesson_page(&self, repo: &Path, branch: &str, mode: &str) -> usize {
+        self.lesson_pages
+            .get(&Self::lesson_key(repo, branch, mode))
+            .copied()
+            .unwrap_or(0) as usize
+            + 1
+    }
+
+    pub fn advance_lesson(&mut self, repo: &Path, branch: &str, mode: &str) {
+        let key = Self::lesson_key(repo, branch, mode);
+        let count = self.lesson_pages.entry(key).or_default();
+        *count = count.saturating_add(1);
+    }
+
     pub fn weak_topics(&self, repo: &Path) -> Vec<String> {
         self.weak_topics_at(repo, now())
     }
@@ -232,5 +253,20 @@ mod tests {
         let item = store.topics.values().next().unwrap();
         assert_eq!(item.correct_streak, 0);
         assert_eq!(item.next_due, 0);
+        assert!(store.lesson_pages.is_empty());
+    }
+
+    #[test]
+    fn lesson_pages_are_separate_per_branch_and_mode() {
+        let repo = Path::new("/repo");
+        let mut store = Store::default();
+        assert_eq!(store.lesson_page(repo, "feature", "practice"), 1);
+        store.advance_lesson(repo, "feature", "practice");
+        assert_eq!(store.lesson_page(repo, "feature", "practice"), 2);
+        assert_eq!(store.lesson_page(repo, "feature", "feature"), 1);
+        assert_eq!(store.lesson_page(repo, "main", "practice"), 1);
+        let restored: Store =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert_eq!(restored.lesson_page(repo, "feature", "practice"), 2);
     }
 }

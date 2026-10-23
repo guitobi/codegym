@@ -28,6 +28,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
 Параметри:
   --repo "ШЛЯХ"                  Шлях до Git-репозиторію
   --base origin/main             База порівняння; лише локальні Git-ref
+  --page 2                       Сторінка файлів фічі (для inspect/feature/practice/review)
   --from src/module.ts           Файл визначення функції для точніших зв'язків
   --questions 5                  Кількість питань (1..5)
   --model gpt-6-luna             Модель у Codex
@@ -59,6 +60,7 @@ struct Options {
     from: Option<String>,
     model: Option<String>,
     questions: usize,
+    page: Option<usize>,
     help: bool,
 }
 
@@ -73,6 +75,7 @@ fn args(items: &[String]) -> Result<Options, String> {
         from: None,
         model: None,
         questions: 5,
+        page: None,
         help: false,
     };
     let mut i = 0;
@@ -106,7 +109,7 @@ fn args(items: &[String]) -> Result<Options, String> {
                 }
                 command = true;
             }
-            "--repo" | "--base" | "--model" | "--questions" | "--from" => {
+            "--repo" | "--base" | "--model" | "--questions" | "--from" | "--page" => {
                 let key = items[i].as_str();
                 i += 1;
                 let value = items
@@ -124,6 +127,15 @@ fn args(items: &[String]) -> Result<Options, String> {
                         if !(1..=5).contains(&result.questions) {
                             return Err("--questions має бути числом 1..5.".into());
                         }
+                    }
+                    "--page" => {
+                        let page = value
+                            .parse::<usize>()
+                            .map_err(|_| "--page має бути числом 1..1000")?;
+                        if !(1..=1000).contains(&page) {
+                            return Err("--page має бути числом 1..1000.".into());
+                        }
+                        result.page = Some(page);
                     }
                     _ => unreachable!(),
                 }
@@ -289,7 +301,21 @@ fn run() -> Result<(), String> {
     if opts.from.is_some() && !matches!(opts.mode, StudyMode::Function(_)) {
         return Err("--from доступний лише з function або graph.".into());
     }
-    let evidence = git::gather(&repo, opts.mode, opts.base.as_deref(), opts.from.as_deref())?;
+    if opts.page.is_some() && matches!(opts.mode, StudyMode::Function(_)) {
+        return Err("--page не використовується для function.".into());
+    }
+    let branch = git::current_branch(&repo)?;
+    let mode_name = opts.mode.key();
+    let page = opts
+        .page
+        .unwrap_or_else(|| progress.lesson_page(&repo, &branch, mode_name));
+    let evidence = git::gather(
+        &repo,
+        opts.mode,
+        opts.base.as_deref(),
+        opts.from.as_deref(),
+        page,
+    )?;
     println!(
         "Гілка: {} · база: {} · файлів-кандидатів: {}",
         evidence.branch,
@@ -314,6 +340,10 @@ fn run() -> Result<(), String> {
         println!("Повторимо слабкі теми: {}", weak_topics.join(", "));
     }
     let questions = coach.questions(&evidence, opts.questions, &weak_topics)?;
+    if opts.page.is_none() && !matches!(evidence.mode, StudyMode::Function(_)) {
+        progress.advance_lesson(&repo, &branch, mode_name);
+        progress.save()?;
+    }
     println!(
         "Підготовлено {} питань. Відповідай українською.",
         questions.len()
@@ -481,5 +511,12 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(result.from.as_deref(), Some("src/calc.ts"));
+    }
+
+    #[test]
+    fn parses_lesson_page_and_rejects_zero() {
+        let opts = args(&["inspect".into(), "--page".into(), "3".into()]).unwrap();
+        assert_eq!(opts.page, Some(3));
+        assert!(args(&["--page".into(), "0".into()]).is_err());
     }
 }

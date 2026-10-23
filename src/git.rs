@@ -24,6 +24,15 @@ impl StudyMode {
             Self::Review => "Незалежна перевірка знань",
         }
     }
+
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Feature => "feature",
+            Self::Function(_) => "function",
+            Self::Practice => "practice",
+            Self::Review => "review",
+        }
+    }
 }
 
 pub struct Evidence {
@@ -126,6 +135,10 @@ pub fn repository(path: Option<&str>) -> Result<PathBuf, String> {
     let root = git(&cwd, &["rev-parse", "--show-toplevel"])?;
     let root = PathBuf::from(root.trim());
     fs::canonicalize(&root).map_err(|err| format!("Не можу відкрити репозиторій: {err}"))
+}
+
+pub fn current_branch(root: &Path) -> Result<String, String> {
+    Ok(git(root, &["branch", "--show-current"])?.trim().to_owned())
 }
 
 fn valid_path(path: &str) -> bool {
@@ -233,10 +246,10 @@ fn file_score(path: &str) -> u8 {
     }
 }
 
-fn choose_files(mut files: Vec<String>, limit: usize) -> Vec<String> {
+fn choose_files(mut files: Vec<String>, limit: usize, page: usize) -> Vec<String> {
     files.sort_by(|a, b| file_score(a).cmp(&file_score(b)).then_with(|| a.cmp(b)));
     files.dedup();
-    let mut selected = Vec::new();
+    let mut ordered = Vec::new();
     let mut first_dirs = HashSet::new();
     // Prefer architectural breadth over taking many files from one directory.
     for file in &files {
@@ -245,21 +258,20 @@ fn choose_files(mut files: Vec<String>, limit: usize) -> Vec<String> {
             .map(|v| v.to_string_lossy().into_owned())
             .unwrap_or_default();
         if first_dirs.insert(parent) {
-            selected.push(file.clone());
-            if selected.len() >= limit {
-                return selected;
-            }
+            ordered.push(file.clone());
         }
     }
     for file in files {
-        if !selected.contains(&file) {
-            selected.push(file);
-            if selected.len() >= limit {
-                break;
-            }
+        if !ordered.contains(&file) {
+            ordered.push(file);
         }
     }
-    selected
+    if ordered.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let number_of_pages = ordered.len().div_ceil(limit);
+    let index = (page.saturating_sub(1) % number_of_pages) * limit;
+    ordered.into_iter().skip(index).take(limit).collect()
 }
 
 fn hunk_line(text: &str) -> Option<usize> {
@@ -420,6 +432,7 @@ pub fn gather(
     mode: StudyMode,
     base_override: Option<&str>,
     defined_in: Option<&str>,
+    page: usize,
 ) -> Result<Evidence, String> {
     let (branch, base, ancestor) = if matches!(mode, StudyMode::Function(_)) {
         let branch = git(repo, &["branch", "--show-current"])?.trim().to_owned();
@@ -436,9 +449,13 @@ pub fn gather(
                 return Err("Немає змін відносно базової гілки. Спробуй codegym function <назва> або --base HEAD~1.".into());
             }
             let full = files.len();
+            let pages = full.div_ceil(14);
+            let chosen_page = (page.saturating_sub(1) % pages) + 1;
             (
-                choose_files(files, 14),
-                format!("Файлів зі змінами: {full}; вибірка охоплює різні шари системи.\n"),
+                choose_files(files, 14, page),
+                format!(
+                    "Файлів зі змінами: {full}; сторінка {chosen_page}/{pages}; вибірка охоплює різні шари системи.\n"
+                ),
             )
         }
     };
@@ -547,8 +564,25 @@ mod tests {
             "src/a/two.ts".into(),
             "src/b/one.ts".into(),
         ];
-        let got = choose_files(a, 2);
+        let got = choose_files(a, 2, 1);
         assert_eq!(got.len(), 2);
         assert!(got.iter().any(|p| p.contains("src/b/")));
+    }
+
+    #[test]
+    fn rotates_file_pages_without_repeating_until_wrap() {
+        let all = (0..31)
+            .map(|n| format!("src/module{n}.ts"))
+            .collect::<Vec<_>>();
+        let p1 = choose_files(all.clone(), 14, 1);
+        let p2 = choose_files(all.clone(), 14, 2);
+        let p3 = choose_files(all.clone(), 14, 3);
+        assert_eq!((p1.len(), p2.len(), p3.len()), (14, 14, 3));
+        assert!(
+            p1.iter()
+                .all(|name| !p2.contains(name) && !p3.contains(name))
+        );
+        assert!(p2.iter().all(|name| !p3.contains(name)));
+        assert_eq!(choose_files(all, 14, 4), p1);
     }
 }

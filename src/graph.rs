@@ -30,6 +30,7 @@ pub struct Graph {
     pub hits: Vec<Hit>,
     pub scanned: usize,
     pub truncated: bool,
+    pub scoped: bool,
 }
 
 fn safe_file(root: &Path, name: &str) -> Option<PathBuf> {
@@ -170,6 +171,144 @@ fn parse_source(path: &str, source: &str, symbol: &str) -> Vec<Hit> {
     hits
 }
 
+fn direct_calls(path: &str, source: &str, local_name: &str) -> Vec<Hit> {
+    fn visit(node: Node<'_>, bytes: &[u8], path: &str, name: &str, hits: &mut Vec<Hit>) {
+        if hits.len() >= MAX_MATCHES {
+            return;
+        }
+        if node.kind() == "call_expression"
+            && let Some(callee) = named(node, "function")
+            && callee.kind() == "identifier"
+            && text(callee, bytes) == Some(name)
+        {
+            hits.push(Hit {
+                path: path.to_owned(),
+                line: node.start_position().row + 1,
+                kind: Kind::Call,
+                owner: function_owner(node, bytes),
+            });
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            visit(child, bytes, path, name, hits);
+        }
+    }
+    let mut parser = Parser::new();
+    let lang = if path.ends_with(".tsx") {
+        tree_sitter_typescript::LANGUAGE_TSX
+    } else {
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT
+    };
+    if parser.set_language(&lang.into()).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    let mut hits = Vec::new();
+    visit(
+        tree.root_node(),
+        source.as_bytes(),
+        path,
+        local_name,
+        &mut hits,
+    );
+    hits
+}
+
+/// Matches calls only when the caller directly imports the requested symbol
+/// from the defining file using a relative named import, including aliases.
+/// Does not resolve path aliases, re-exports, shadowing, or dynamic dispatch.
+pub fn analyze_scoped(root: &Path, symbol: &str, defined_in: &str) -> Result<Graph, String> {
+    if symbol.is_empty()
+        || symbol.len() > 120
+        || !symbol
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    {
+        return Err("Некоректна назва символу.".into());
+    }
+    let root = fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let Some(definition_path) = safe_file(&root, defined_in) else {
+        return Err("Файл визначення не існує або його небезпечно читати.".into());
+    };
+    let code = fs::read_to_string(definition_path).map_err(|e| e.to_string())?;
+    let definitions = parse_source(defined_in, &code, symbol)
+        .into_iter()
+        .filter(|h| h.kind == Kind::Definition)
+        .collect::<Vec<_>>();
+    if definitions.is_empty() {
+        return Err(format!("У {defined_in} не знайдено визначення {symbol}."));
+    }
+    let result = Command::new("git")
+        .current_dir(&root)
+        .args(["ls-files", "-z", "--", "*.ts", "*.tsx"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !result.status.success() || result.stdout.len() > 2_000_000 {
+        return Err("Не вийшло прочитати обмежений список Git-файлів.".into());
+    }
+    let tracked = result
+        .stdout
+        .split(|c| *c == 0)
+        .filter_map(|s| std::str::from_utf8(s).ok())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    if !tracked.contains(&defined_in) {
+        return Err("Визначення функції повинно бути відстежуваним Git-файлом.".into());
+    }
+    let mut graph = Graph {
+        scoped: true,
+        hits: definitions,
+        ..Graph::default()
+    };
+    for (idx, path) in tracked.iter().enumerate() {
+        if idx >= MAX_TRACKED_FILES {
+            graph.truncated = true;
+            break;
+        }
+        let Some(file) = safe_file(&root, path) else {
+            continue;
+        };
+        let Ok(text) = fs::read_to_string(file) else {
+            continue;
+        };
+        graph.scanned += 1;
+        if !text.contains(symbol) {
+            continue;
+        }
+        let locals = if *path == defined_in {
+            vec![symbol.to_owned()]
+        } else {
+            crate::imports::named_import_aliases(path, &text, defined_in, symbol)
+        };
+        for local_name in locals {
+            for hit in direct_calls(path, &text, &local_name) {
+                if graph.hits.len() >= MAX_MATCHES {
+                    graph.truncated = true;
+                    break;
+                }
+                graph.hits.push(hit);
+            }
+            if graph.truncated {
+                break;
+            }
+        }
+        if graph.truncated {
+            break;
+        }
+    }
+    graph.hits.sort_by(|a, b| {
+        let rank = |v: &Kind| if *v == Kind::Definition { 0 } else { 1 };
+        rank(&a.kind)
+            .cmp(&rank(&b.kind))
+            .then(a.path.cmp(&b.path))
+            .then(a.line.cmp(&b.line))
+    });
+    graph.hits.dedup();
+    Ok(graph)
+}
+
 fn source_definitions(path: &str, source: &str) -> Vec<String> {
     fn visit(node: Node<'_>, bytes: &[u8], results: &mut Vec<String>) {
         if results.len() >= 12 {
@@ -241,7 +380,7 @@ pub fn related_callers(root: &Path, changed: &[String]) -> Related {
     let original = changed.iter().collect::<HashSet<_>>();
     let mut paths = HashSet::new();
     for (declared_in, symbol) in candidates {
-        let Ok(graph) = analyze(root, &symbol) else {
+        let Ok(graph) = analyze_scoped(root, &symbol, &declared_in) else {
             continue;
         };
         for hit in graph.hits {
@@ -252,7 +391,7 @@ pub fn related_callers(root: &Path, changed: &[String]) -> Related {
                 continue;
             }
             related.summary.push_str(&format!(
-                "Функція {symbol} із {declared_in} може викликатися з {}:{}{} (за іменем, потребує перевірки імпортів).\n",
+                "Функція {symbol} із {declared_in} викликається через відносний іменований імпорт з {}:{}{} (локальне затінення не перевірено).\n",
                 hit.path, hit.line,
                 hit.owner.as_deref().map_or(String::new(), |v| format!(" у {v}"))
             ));
@@ -356,7 +495,11 @@ impl Graph {
             "Синтаксичний аналіз TypeScript/TSX символу {symbol}; перевірено {} файлів.\n",
             self.scanned
         );
-        out.push_str("Це кандидати за ім'ям, а не гарантована розв'язка імпортів/типів.\n");
+        if self.scoped {
+            out.push_str("Звірено прямі іменовані відносні імпорти; реекспорти, типи й затінення не розв'язано.\n");
+        } else {
+            out.push_str("Це кандидати за ім'ям, а не гарантована розв'язка імпортів/типів.\n");
+        }
         for hit in &self.hits {
             let kind = if hit.kind == Kind::Definition {
                 "оголошення"
@@ -459,17 +602,31 @@ mod tests {
             )
             .map_err(|e| e.to_string())?;
             fs::write(root.join("src/route.ts"),
-                "import { calculateDays } from './logic';\nexport function handler() { return calculateDays(3); }\n")
+                "import { calculateDays as totalDays } from './logic';\nexport function handler() { return totalDays(3); }\n")
+                .map_err(|e| e.to_string())?;
+            fs::write(root.join("src/unrelated.ts"),
+                "export function calculateDays(x: number) { return x; }\nexport const use = () => calculateDays(7);")
                 .map_err(|e| e.to_string())?;
             let add = Command::new("git")
                 .current_dir(&root)
-                .args(["add", "src/logic.ts", "src/route.ts"])
+                .args(["add", "src/logic.ts", "src/route.ts", "src/unrelated.ts"])
                 .status()
                 .map_err(|e| e.to_string())?;
             if !add.success() {
                 return Err("git add failed".into());
             }
             let found = related_callers(&root, &["src/logic.ts".to_owned()]);
+            let scoped = analyze_scoped(&root, "calculateDays", "src/logic.ts")?;
+            if !scoped.scoped || scoped.hits.iter().any(|h| h.path == "src/unrelated.ts") {
+                return Err("Unrelated identically named function leaked into scoped graph".into());
+            }
+            if !scoped
+                .hits
+                .iter()
+                .any(|h| h.path == "src/route.ts" && h.owner.as_deref() == Some("handler"))
+            {
+                return Err(format!("Aliased direct call missing: {:?}", scoped.hits));
+            }
             if found
                 .hits
                 .iter()
@@ -495,6 +652,7 @@ mod tests {
                 owner: None,
             }],
             truncated: true,
+            scoped: false,
         };
         let desc = graph.description("foo");
         assert!(desc.contains("не гарантована"));

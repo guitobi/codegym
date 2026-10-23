@@ -1,6 +1,7 @@
 mod coach;
 mod git;
 mod graph;
+mod imports;
 mod progress;
 mod syntax;
 
@@ -16,6 +17,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   codegym feature                Архітектура фічі, функції, виклики, крайні випадки
   codegym function NAME          Де функція реалізована та хто її викликає
   codegym graph NAME             Покажи TS/TSX граф викликів без AI
+  codegym graph NAME --from PATH  Перевір відносні TS/TSX імпорти з PATH
   codegym inspect                Переглянути вибраний контекст без AI
   codegym practice               Самостійно писати код
   codegym review                 Контрольна перевірка без підказок
@@ -25,6 +27,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
 Параметри:
   --repo "ШЛЯХ"                  Шлях до Git-репозиторію
   --base origin/main             База порівняння; лише локальні Git-ref
+  --from src/module.ts           Файл визначення функції для точніших зв'язків
   --questions 5                  Кількість питань (1..5)
   --model gpt-6-luna             Модель у Codex
 
@@ -52,6 +55,7 @@ struct Options {
     inspect: bool,
     repo: Option<String>,
     base: Option<String>,
+    from: Option<String>,
     model: Option<String>,
     questions: usize,
     help: bool,
@@ -65,6 +69,7 @@ fn args(items: &[String]) -> Result<Options, String> {
         inspect: false,
         repo: None,
         base: None,
+        from: None,
         model: None,
         questions: 5,
         help: false,
@@ -100,7 +105,7 @@ fn args(items: &[String]) -> Result<Options, String> {
                 }
                 command = true;
             }
-            "--repo" | "--base" | "--model" | "--questions" => {
+            "--repo" | "--base" | "--model" | "--questions" | "--from" => {
                 let key = items[i].as_str();
                 i += 1;
                 let value = items
@@ -109,6 +114,7 @@ fn args(items: &[String]) -> Result<Options, String> {
                 match key {
                     "--repo" => result.repo = Some(value.clone()),
                     "--base" => result.base = Some(value.clone()),
+                    "--from" => result.from = Some(value.clone()),
                     "--model" => result.model = Some(value.clone()),
                     "--questions" => {
                         result.questions = value
@@ -244,7 +250,11 @@ fn run() -> Result<(), String> {
     }
     let repo = git::repository(opts.repo.as_deref())?;
     if let Some(symbol) = &opts.graph_symbol {
-        let graph = graph::analyze(&repo, symbol)?;
+        let graph = if let Some(file) = opts.from.as_deref() {
+            graph::analyze_scoped(&repo, symbol, file)?
+        } else {
+            graph::analyze(&repo, symbol)?
+        };
         println!("{}", graph.description(symbol));
         return Ok(());
     }
@@ -256,7 +266,10 @@ fn run() -> Result<(), String> {
     println!("CodeGym 0.1.0 · {}", opts.mode.title());
     println!("Репозиторій: {}", repo.display());
     println!("Аналізую локальну історію Git...");
-    let evidence = git::gather(&repo, opts.mode, opts.base.as_deref())?;
+    if opts.from.is_some() && !matches!(opts.mode, StudyMode::Function(_)) {
+        return Err("--from доступний лише з function або graph.".into());
+    }
+    let evidence = git::gather(&repo, opts.mode, opts.base.as_deref(), opts.from.as_deref())?;
     println!(
         "Гілка: {} · база: {} · файлів-кандидатів: {}",
         evidence.branch,
@@ -394,5 +407,17 @@ mod tests {
         let opts = args(&["inspect".into(), "--base".into(), "main".into()]).unwrap();
         assert!(opts.inspect);
         assert_eq!(opts.base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn parses_scoped_graph() {
+        let result = args(&[
+            "graph".into(),
+            "calculateDays".into(),
+            "--from".into(),
+            "src/calc.ts".into(),
+        ])
+        .unwrap();
+        assert_eq!(result.from.as_deref(), Some("src/calc.ts"));
     }
 }

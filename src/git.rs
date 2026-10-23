@@ -360,9 +360,17 @@ fn verify_symbol(symbol: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn function_sources(root: &Path, symbol: &str) -> Result<(Vec<String>, String), String> {
+fn function_sources(
+    root: &Path,
+    symbol: &str,
+    defined_in: Option<&str>,
+) -> Result<(Vec<String>, String), String> {
     verify_symbol(symbol)?;
-    let graph = crate::graph::analyze(root, symbol)?;
+    let graph = if let Some(file) = defined_in {
+        crate::graph::analyze_scoped(root, symbol, file)?
+    } else {
+        crate::graph::analyze(root, symbol)?
+    };
     if !graph.hits.is_empty() {
         return Ok((graph.files(), graph.description(symbol)));
     }
@@ -411,6 +419,7 @@ pub fn gather(
     repo: &Path,
     mode: StudyMode,
     base_override: Option<&str>,
+    defined_in: Option<&str>,
 ) -> Result<Evidence, String> {
     let (branch, base, ancestor) = if matches!(mode, StudyMode::Function(_)) {
         let branch = git(repo, &["branch", "--show-current"])?.trim().to_owned();
@@ -420,7 +429,7 @@ pub fn gather(
         branch_and_base(repo, base_override)?
     };
     let (mut files, mut overview) = match &mode {
-        StudyMode::Function(symbol) => function_sources(repo, symbol)?,
+        StudyMode::Function(symbol) => function_sources(repo, symbol, defined_in)?,
         _ => {
             let files = changed_files(repo, &ancestor)?;
             if files.is_empty() {

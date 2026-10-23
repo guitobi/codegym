@@ -5,6 +5,7 @@ mod imports;
 mod progress;
 mod runner;
 mod syntax;
+mod ui;
 
 use coach::{Coach, Question};
 use git::StudyMode;
@@ -176,13 +177,8 @@ fn ask(
     practice: bool,
     review: bool,
 ) -> Result<Answer, String> {
-    println!("\n{}", "─".repeat(72));
-    println!(
-        "{} · {}:{}",
-        question.topic, question.source_path, question.source_line
-    );
-    println!("\n{code}");
-    println!("{}\n", question.question);
+    ui::code_block(code);
+    ui::question_prompt(&question.question, practice);
     if practice {
         if let Some(task) = &question.practice {
             println!(
@@ -243,7 +239,7 @@ fn ask(
             ":quit" => return Ok(Answer::Quit),
             ":skip" => return Ok(Answer::Skip),
             ":source" => {
-                println!("\n{code}");
+                ui::code_block(code);
                 continue;
             }
             ":hint" if !review => {
@@ -275,6 +271,7 @@ fn ask(
 }
 
 fn run() -> Result<(), String> {
+    ui::init();
     let opts = args(&std::env::args().skip(1).collect::<Vec<_>>())?;
     if opts.help {
         println!("{HELP}");
@@ -295,7 +292,7 @@ fn run() -> Result<(), String> {
         progress.print(&repo);
         return Ok(());
     }
-    println!("CodeGym 0.1.0 · {}", opts.mode.title());
+    ui::banner(env!("CARGO_PKG_VERSION"), opts.mode.title());
     println!("Репозиторій: {}", repo.display());
     println!("Аналізую локальну історію Git...");
     if opts.from.is_some() && !matches!(opts.mode, StudyMode::Function(_)) {
@@ -350,7 +347,13 @@ fn run() -> Result<(), String> {
     );
     let mut scores = Vec::new();
     for (index, q) in questions.iter().enumerate() {
-        println!("\nПитання {} із {}", index + 1, questions.len());
+        ui::question_heading(
+            index + 1,
+            questions.len(),
+            &q.topic,
+            &q.source_path,
+            q.source_line,
+        );
         let snippet = evidence.question_context(&q.question, &q.source_path, q.source_line);
         let answer = ask(
             &coach,
@@ -428,14 +431,7 @@ fn run() -> Result<(), String> {
                 println!("Оцінюю відповідь...");
                 let result = coach.evaluate(q, &snippet, &answer)?;
                 let score = result.score.min(test_score_cap);
-                println!(
-                    "\nОцінка: {score}/5{}",
-                    if score < result.score {
-                        " (обмежено результатами реальних тестів)"
-                    } else {
-                        ""
-                    }
-                );
+                ui::result(score, score < result.score);
                 println!("{}", result.feedback);
                 println!("Що повторити: {}", result.what_to_improve);
                 println!("Розбір: {}", result.model_answer);

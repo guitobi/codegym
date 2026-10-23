@@ -6,6 +6,7 @@ mod progress;
 mod runner;
 mod session;
 mod syntax;
+mod tui;
 mod ui;
 
 use coach::{Coach, Question};
@@ -27,6 +28,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   codegym review                 Контрольна перевірка без підказок
   codegym progress               Статистика навчання
   codegym mistakes               Повторити конкретні питання, у яких помилявся
+  codegym feature --tui           Повноекранний режим із панеллю коду
   codegym help                   Довідка
 
 Параметри:
@@ -36,6 +38,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   --from src/module.ts           Файл визначення функції для точніших зв'язків
   --questions 5                  Кількість питань (1..5)
   --model gpt-6-luna             Модель у Codex
+  --tui                          Інтерактивний повноекранний термінал
 
 Команди під час заняття:
   :hint                          Підказка (крім review)
@@ -67,6 +70,7 @@ struct Options {
     questions: usize,
     page: Option<usize>,
     fresh: bool,
+    tui: bool,
     help: bool,
 }
 
@@ -84,6 +88,7 @@ fn args(items: &[String]) -> Result<Options, String> {
         questions: 5,
         page: None,
         fresh: false,
+        tui: false,
         help: false,
     };
     let mut i = 0;
@@ -92,6 +97,7 @@ fn args(items: &[String]) -> Result<Options, String> {
         match items[i].as_str() {
             "help" | "-h" | "--help" => result.help = true,
             "--fresh" => result.fresh = true,
+            "--tui" => result.tui = true,
             "feature" | "practice" | "review" | "progress" | "mistakes" | "inspect" if !command => {
                 match items[i].as_str() {
                     "practice" => result.mode = StudyMode::Practice,
@@ -185,7 +191,40 @@ fn ask(
     code: &str,
     practice: bool,
     review: bool,
+    fullscreen: bool,
 ) -> Result<Answer, String> {
+    if fullscreen {
+        let mut state = tui::Editor::default();
+        let mut message = String::new();
+        loop {
+            let location = format!("{}:{}", question.source_path, question.source_line);
+            let result = tui::prompt(
+                tui::Prompt {
+                    question: &question.question,
+                    source: code,
+                    topic: &question.topic,
+                    location: &location,
+                    practice,
+                    review,
+                    message: &message,
+                },
+                &mut state,
+            )?;
+            match result {
+                tui::Action::Submit(answer) => return Ok(Answer::Response(answer)),
+                tui::Action::Hint => message = format!("Підказка: {}", question.hint),
+                tui::Action::Ask(query) => {
+                    message = match coach.tutor(question, code, &query) {
+                        Ok(reply) => format!("{} → {}", reply.explanation, reply.next_step),
+                        Err(error) => format!("AI-викладач: {error}"),
+                    };
+                }
+                tui::Action::Learn => return Ok(Answer::Learn),
+                tui::Action::Skip => return Ok(Answer::Skip),
+                tui::Action::Quit => return Ok(Answer::Quit),
+            }
+        }
+    }
     ui::code_block(code);
     ui::question_prompt(&question.question, practice);
     if practice {
@@ -284,6 +323,7 @@ fn review_mistakes(
     branch: &str,
     mut store: progress::Store,
     coach: Coach,
+    fullscreen: bool,
 ) -> Result<(), String> {
     use std::collections::HashSet;
     let due = store.due_cards(repo, branch);
@@ -328,7 +368,7 @@ fn review_mistakes(
             &q.source_path,
             q.source_line,
         );
-        let answer = ask(&coach, q, &snippet, q.practice.is_some(), false)?;
+        let answer = ask(&coach, q, &snippet, q.practice.is_some(), false, fullscreen)?;
         let score = match answer {
             Answer::Quit => break,
             Answer::Skip | Answer::Learn => {
@@ -368,6 +408,12 @@ fn run() -> Result<(), String> {
         println!("{HELP}");
         return Ok(());
     }
+    if opts.tui && !tui::supported() {
+        return Err(
+            "--tui потребує інтерактивного термінала; для pipe використай стандартний режим."
+                .into(),
+        );
+    }
     let repo = git::repository(opts.repo.as_deref())?;
     if let Some(symbol) = &opts.graph_symbol {
         let graph = if let Some(file) = opts.from.as_deref() {
@@ -385,7 +431,7 @@ fn run() -> Result<(), String> {
     }
     if opts.show_mistakes {
         let branch = git::current_branch(&repo)?;
-        return review_mistakes(&repo, &branch, progress, Coach::new(opts.model));
+        return review_mistakes(&repo, &branch, progress, Coach::new(opts.model), opts.tui);
     }
     ui::banner(env!("CARGO_PKG_VERSION"), opts.mode.title());
     println!("Репозиторій: {}", repo.display());
@@ -516,6 +562,7 @@ fn run() -> Result<(), String> {
             &snippet,
             matches!(&evidence.mode, StudyMode::Practice),
             matches!(&evidence.mode, StudyMode::Review),
+            opts.tui,
         )?;
         let score = match answer {
             Answer::Quit => {

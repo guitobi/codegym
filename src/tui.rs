@@ -154,7 +154,7 @@ pub fn prompt(view: Prompt<'_>, state: &mut Editor) -> Result<Action, String> {
                     Constraint::Percentage(49),
                     Constraint::Percentage(20),
                     Constraint::Min(5),
-                    Constraint::Length(3),
+                    Constraint::Length(6),
                 ]).split(frame.area());
             let header = Paragraph::new(Line::from(vec![
                 Span::styled(" ◆ CodeGym ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -182,9 +182,11 @@ pub fn prompt(view: Prompt<'_>, state: &mut Editor) -> Result<Action, String> {
                 (state.answer.as_str(), " Твоя відповідь • Enter або F5 = перевірити ")
             };
             let entered = if body.is_empty() { Text::raw("Пиши тут…") } else { Text::raw(body) };
+            let visible_lines = vertical[3].height.saturating_sub(2) as usize;
+            let input_scroll = body.lines().count().saturating_sub(visible_lines) as u16;
             frame.render_widget(
                 Paragraph::new(entered).block(Block::default().borders(Borders::ALL).title(label))
-                    .wrap(Wrap { trim: false }),
+                    .wrap(Wrap { trim: false }).scroll((input_scroll, 0)),
                 vertical[3]
             );
             let shortcuts = if review {
@@ -195,7 +197,7 @@ pub fn prompt(view: Prompt<'_>, state: &mut Editor) -> Result<Action, String> {
             let footer = Paragraph::new(vec![
                 Line::from(Span::styled(shortcuts, Style::default().fg(Color::Green))),
                 Line::from(message.chars().take(240).collect::<String>()),
-            ]).block(Block::default().borders(Borders::ALL));
+            ]).block(Block::default().borders(Borders::ALL)).wrap(Wrap { trim: false });
             frame.render_widget(footer, vertical[4]);
         }).map_err(|e| format!("Помилка малювання термінала: {e}"))?;
 
@@ -220,6 +222,78 @@ pub fn prompt(view: Prompt<'_>, state: &mut Editor) -> Result<Action, String> {
                         .collect();
                     target.push_str(&clean);
                 }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Keep the result visible before the next question replaces the screen.
+/// Enter continues; Esc ends the current lesson after progress is saved.
+pub fn show_feedback(topic: &str, explanation: &str) -> Result<bool, String> {
+    if !supported() {
+        return Err("Підсумок у TUI потребує інтерактивного термінала.".into());
+    }
+    enable_raw_mode().map_err(|e| e.to_string())?;
+    let _screen = Screen;
+    execute!(io::stdout(), EnterAlternateScreen).map_err(|e| e.to_string())?;
+    let mut terminal =
+        Terminal::new(CrosstermBackend::new(io::stdout())).map_err(|e| e.to_string())?;
+    let mut scroll = 0u16;
+    loop {
+        terminal
+            .draw(|frame| {
+                let sections = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(5),
+                        Constraint::Length(3),
+                    ])
+                    .split(frame.area());
+                frame.render_widget(
+                    Paragraph::new(format!("◆ CodeGym • {topic}"))
+                        .style(
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(" Результат заняття "),
+                        ),
+                    sections[0],
+                );
+                frame.render_widget(
+                    Paragraph::new(explanation)
+                        .wrap(Wrap { trim: false })
+                        .scroll((scroll, 0))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(" Оцінка, пояснення та правильна відповідь "),
+                        ),
+                    sections[1],
+                );
+                frame.render_widget(
+                    Paragraph::new(
+                        "Enter — наступне питання   PgUp/PgDn — прокрутка   Esc — завершити урок",
+                    )
+                    .block(Block::default().borders(Borders::ALL)),
+                    sections[2],
+                );
+            })
+            .map_err(|e| e.to_string())?;
+        if event::poll(Duration::from_millis(200)).map_err(|e| e.to_string())?
+            && let Event::Key(key) = event::read().map_err(|e| e.to_string())?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Enter | KeyCode::F(5) => return Ok(true),
+                KeyCode::Esc => return Ok(false),
+                KeyCode::PageDown | KeyCode::Down => scroll = scroll.saturating_add(5),
+                KeyCode::PageUp | KeyCode::Up => scroll = scroll.saturating_sub(5),
                 _ => {}
             }
         }

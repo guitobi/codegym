@@ -375,10 +375,12 @@ fn review_mistakes(
             q.source_line,
         );
         let answer = ask(&coach, q, &snippet, q.practice.is_some(), false, fullscreen)?;
+        let feedback_text: String;
         let score = match answer {
             Answer::Quit => break,
             Answer::Skip | Answer::Learn => {
                 println!("Розбір: {}", q.reference_answer);
+                feedback_text = format!("Розбір (0/5)\n\n{}", q.reference_answer);
                 0
             }
             Answer::Response(value) => {
@@ -397,12 +399,19 @@ fn review_mistakes(
                 println!("{}", review.feedback);
                 println!("Що повторити: {}", review.what_to_improve);
                 println!("Розбір: {}", review.model_answer);
+                feedback_text = format!(
+                    "Оцінка {score}/5\n\n{}\n\nЩо повторити:\n{}\n\nПравильна відповідь:\n{}",
+                    review.feedback, review.what_to_improve, review.model_answer,
+                );
                 score
             }
         };
         store.record(repo, &q.topic, score);
         store.remember_answer(repo, branch, q, &snippet, score);
         store.save()?;
+        if fullscreen && !tui::show_feedback(&q.topic, &feedback_text)? {
+            break;
+        }
     }
     Ok(())
 }
@@ -585,6 +594,7 @@ fn run() -> Result<(), String> {
             matches!(&evidence.mode, StudyMode::Review),
             opts.tui,
         )?;
+        let feedback_text: String;
         let score = match answer {
             Answer::Quit => {
                 if opts.page.is_none() {
@@ -596,14 +606,17 @@ fn run() -> Result<(), String> {
             }
             Answer::Skip => {
                 println!("Пропущено. Розбір: {}", q.reference_answer);
+                feedback_text = format!("Пропущено (0/5)\n\nРозбір:\n{}", q.reference_answer);
                 0
             }
             Answer::Learn => {
                 println!("Розбір: {}", q.reference_answer);
+                feedback_text = format!("Навчальний розбір (0/5)\n\n{}", q.reference_answer);
                 0
             }
             Answer::Response(answer) => {
                 let mut test_score_cap = 5;
+                let mut test_note = String::new();
                 if matches!(&evidence.mode, StudyMode::Practice)
                     && let Some(report) = syntax::check(&q.source_path, &answer)
                 {
@@ -630,8 +643,19 @@ fn run() -> Result<(), String> {
                         Ok(result) => {
                             let passed = result.passed();
                             println!("Тести: {passed}/{} пройдено.", result.results.len());
+                            test_note.push_str(&format!(
+                                "Тести QuickJS: {passed}/{}\n",
+                                result.results.len()
+                            ));
                             for (idx, case) in result.results.iter().enumerate() {
                                 if !case.passed {
+                                    test_note.push_str(&format!(
+                                        "Тест {}: очікувалось {}, отримано {} {}\n",
+                                        idx + 1,
+                                        case.expected,
+                                        case.actual,
+                                        case.error
+                                    ));
                                     println!(
                                         "  Тест {}: очікувалось {}, отримано {}{}",
                                         idx + 1,
@@ -651,6 +675,7 @@ fn run() -> Result<(), String> {
                         }
                         Err(error) => {
                             println!("Тести не запустилися або спрацював ліміт: {error}");
+                            test_note = format!("Тести QuickJS: {error}\n");
                             test_score_cap = 0;
                         }
                     }
@@ -662,6 +687,10 @@ fn run() -> Result<(), String> {
                 println!("{}", result.feedback);
                 println!("Що повторити: {}", result.what_to_improve);
                 println!("Розбір: {}", result.model_answer);
+                feedback_text = format!(
+                    "Оцінка: {score}/5\n\n{test_note}\n{}\n\nЩо повторити:\n{}\n\nПравильна відповідь:\n{}",
+                    result.feedback, result.what_to_improve, result.model_answer,
+                );
                 score
             }
         };
@@ -679,6 +708,10 @@ fn run() -> Result<(), String> {
             } else {
                 lesson.save(&repo)?;
             }
+        }
+        if opts.tui && !tui::show_feedback(&q.topic, &feedback_text)? {
+            println!("Заняття призупинено після збереження відповіді.");
+            break;
         }
     }
     if !scores.is_empty() {

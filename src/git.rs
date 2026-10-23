@@ -31,6 +31,7 @@ pub struct Evidence {
     pub branch: String,
     pub base: String,
     pub context: String,
+    pub overview: String,
     pub paths: HashSet<String>,
     pub mode: StudyMode,
 }
@@ -454,6 +455,7 @@ pub fn gather(
         "РЕЖИМ: {}\nГілка: {branch}\nБаза: {base} (merge-base {ancestor})\n{overview}\n",
         mode.title()
     );
+    let summary = context.clone();
     let mut paths = HashSet::new();
     for path in &files {
         let center = match &mode {
@@ -503,6 +505,7 @@ pub fn gather(
         branch,
         base,
         context,
+        overview: summary,
         paths,
         mode,
     })

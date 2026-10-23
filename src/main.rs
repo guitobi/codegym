@@ -15,6 +15,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   codegym feature                Архітектура фічі, функції, виклики, крайні випадки
   codegym function NAME          Де функція реалізована та хто її викликає
   codegym graph NAME             Покажи TS/TSX граф викликів без AI
+  codegym inspect                Переглянути вибраний контекст без AI
   codegym practice               Самостійно писати код
   codegym review                 Контрольна перевірка без підказок
   codegym progress               Статистика навчання
@@ -46,6 +47,7 @@ struct Options {
     mode: StudyMode,
     graph_symbol: Option<String>,
     show_progress: bool,
+    inspect: bool,
     repo: Option<String>,
     base: Option<String>,
     model: Option<String>,
@@ -58,6 +60,7 @@ fn args(items: &[String]) -> Result<Options, String> {
         mode: StudyMode::Feature,
         graph_symbol: None,
         show_progress: false,
+        inspect: false,
         repo: None,
         base: None,
         model: None,
@@ -69,11 +72,12 @@ fn args(items: &[String]) -> Result<Options, String> {
     while i < items.len() {
         match items[i].as_str() {
             "help" | "-h" | "--help" => result.help = true,
-            "feature" | "practice" | "review" | "progress" if !command => {
+            "feature" | "practice" | "review" | "progress" | "inspect" if !command => {
                 match items[i].as_str() {
                     "practice" => result.mode = StudyMode::Practice,
                     "review" => result.mode = StudyMode::Review,
                     "progress" => result.show_progress = true,
+                    "inspect" => result.inspect = true,
                     _ => result.mode = StudyMode::Feature,
                 }
                 command = true;
@@ -228,6 +232,17 @@ fn run() -> Result<(), String> {
         evidence.base,
         evidence.paths.len()
     );
+    if opts.inspect {
+        print!("{}", evidence.overview);
+        let mut files = evidence.paths.iter().collect::<Vec<_>>();
+        files.sort();
+        println!("Відібрані файли (без відправлення коду в AI):");
+        for file in files {
+            println!("  {file}");
+        }
+        println!("Обсяг контексту: {} байтів.", evidence.context.len());
+        return Ok(());
+    }
     println!("Генерую {} питань через Codex...", opts.questions);
     let coach = Coach::new(opts.model);
     let weak_topics = progress.weak_topics(&repo);
@@ -322,5 +337,12 @@ mod tests {
     fn parses_graph_command() {
         let opts = args(&["graph".into(), "checkout".into()]).unwrap();
         assert_eq!(opts.graph_symbol.as_deref(), Some("checkout"));
+    }
+
+    #[test]
+    fn parses_inspect_command() {
+        let opts = args(&["inspect".into(), "--base".into(), "main".into()]).unwrap();
+        assert!(opts.inspect);
+        assert_eq!(opts.base.as_deref(), Some("main"));
     }
 }

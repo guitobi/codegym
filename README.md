@@ -21,6 +21,7 @@
     codegym feature --base main     # Архітектура, логіка, крайні випадки
     codegym function snapToWeek    # Навчання на визначенні й викликах реальної функції
     codegym graph snapToWeek       # Де оголошена й викликається (без AI)
+    codegym inspect --base main    # Які файли потраплять в урок (без AI)
     codegym practice --questions 3  # Самостійно писати код
     codegym review                  # Без підказок
     codegym progress                # Історія балів за темами

@@ -29,6 +29,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
 
 Команди під час заняття:
   :hint                          Підказка (крім review)
+  :ask ЧОМУ ...                 Запитати AI-викладача про конкретний код
   :source                        Повторити код
   :learn                         Відразу побачити розбір (0 балів)
   :skip                          Пропустити (0 балів)
@@ -148,7 +149,13 @@ enum Answer {
     Quit,
 }
 
-fn ask(question: &Question, code: &str, practice: bool, review: bool) -> Result<Answer, String> {
+fn ask(
+    coach: &Coach,
+    question: &Question,
+    code: &str,
+    practice: bool,
+    review: bool,
+) -> Result<Answer, String> {
     println!("\n{}", "─".repeat(72));
     println!(
         "{} · {}:{}",
@@ -161,7 +168,11 @@ fn ask(question: &Question, code: &str, practice: bool, review: bool) -> Result<
     }
     println!(
         "Доступно: :source {} :skip :quit",
-        if review { "" } else { ":hint :learn" }
+        if review {
+            ""
+        } else {
+            ":hint :learn :ask ПИТАННЯ"
+        }
     );
     let mut answer = String::new();
     loop {
@@ -170,6 +181,25 @@ fn ask(question: &Question, code: &str, practice: bool, review: bool) -> Result<
         let Some(line) = input_line()? else {
             return Ok(Answer::Quit);
         };
+        if line == ":ask" {
+            println!("Використання: :ask чому тут потрібен await?");
+            continue;
+        }
+        if let Some(query) = line.strip_prefix(":ask ") {
+            if review {
+                println!("У режимі review консультації вимкнені.");
+            } else {
+                println!("Пояснюю, не розкриваючи готову відповідь...");
+                match coach.tutor(question, code, query.trim()) {
+                    Ok(reply) => {
+                        println!("\n{}\n", reply.explanation);
+                        println!("Спробуй: {}\n", reply.next_step);
+                    }
+                    Err(error) => println!("Не вдалося отримати пояснення: {error}"),
+                }
+            }
+            continue;
+        }
         match line.trim() {
             ":quit" => return Ok(Answer::Quit),
             ":skip" => return Ok(Answer::Skip),
@@ -259,6 +289,7 @@ fn run() -> Result<(), String> {
         println!("\nПитання {} із {}", index + 1, questions.len());
         let snippet = evidence.question_context(&q.question, &q.source_path, q.source_line);
         let answer = ask(
+            &coach,
             q,
             &snippet,
             matches!(&evidence.mode, StudyMode::Practice),

@@ -1,5 +1,6 @@
 mod coach;
 mod git;
+mod graph;
 mod progress;
 
 use coach::{Coach, Question};
@@ -13,6 +14,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   codegym                        Розібрати зміни поточної гілки
   codegym feature                Архітектура фічі, функції, виклики, крайні випадки
   codegym function NAME          Де функція реалізована та хто її викликає
+  codegym graph NAME             Покажи TS/TSX граф викликів без AI
   codegym practice               Самостійно писати код
   codegym review                 Контрольна перевірка без підказок
   codegym progress               Статистика навчання
@@ -42,6 +44,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
 #[derive(Debug)]
 struct Options {
     mode: StudyMode,
+    graph_symbol: Option<String>,
     show_progress: bool,
     repo: Option<String>,
     base: Option<String>,
@@ -53,6 +56,7 @@ struct Options {
 fn args(items: &[String]) -> Result<Options, String> {
     let mut result = Options {
         mode: StudyMode::Feature,
+        graph_symbol: None,
         show_progress: false,
         repo: None,
         base: None,
@@ -74,7 +78,8 @@ fn args(items: &[String]) -> Result<Options, String> {
                 }
                 command = true;
             }
-            "function" if !command => {
+            "function" | "graph" if !command => {
+                let is_graph = items[i] == "graph";
                 i += 1;
                 let name = items
                     .get(i)
@@ -82,7 +87,11 @@ fn args(items: &[String]) -> Result<Options, String> {
                 if name.starts_with('-') {
                     return Err("Некоректне ім'я функції.".into());
                 }
-                result.mode = StudyMode::Function(name.clone());
+                if is_graph {
+                    result.graph_symbol = Some(name.clone());
+                } else {
+                    result.mode = StudyMode::Function(name.clone());
+                }
                 command = true;
             }
             "--repo" | "--base" | "--model" | "--questions" => {
@@ -199,6 +208,11 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     let repo = git::repository(opts.repo.as_deref())?;
+    if let Some(symbol) = &opts.graph_symbol {
+        let graph = graph::analyze(&repo, symbol)?;
+        println!("{}", graph.description(symbol));
+        return Ok(());
+    }
     let mut progress = progress::Store::load()?;
     if opts.show_progress {
         progress.print(&repo);
@@ -302,5 +316,11 @@ mod tests {
     fn invalid_question_count() {
         assert!(args(&["--questions".into(), "0".into()]).is_err());
         assert!(args(&["--questions".into(), "100".into()]).is_err());
+    }
+
+    #[test]
+    fn parses_graph_command() {
+        let opts = args(&["graph".into(), "checkout".into()]).unwrap();
+        assert_eq!(opts.graph_symbol.as_deref(), Some("checkout"));
     }
 }

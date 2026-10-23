@@ -361,6 +361,12 @@ fn verify_symbol(symbol: &str) -> Result<(), String> {
 
 fn function_sources(root: &Path, symbol: &str) -> Result<(Vec<String>, String), String> {
     verify_symbol(symbol)?;
+    let graph = crate::graph::analyze(root, symbol)?;
+    if !graph.hits.is_empty() {
+        return Ok((graph.files(), graph.description(symbol)));
+    }
+    // Textual fallback only when syntax-aware TS/TSX lookup found nothing:
+    // e.g. Rust, Python or a symbol referenced via a non-call expression.
     let output = match git(root, &["grep", "-n", "-I", "-F", "-e", symbol, "--"]) {
         Ok(output) => output,
         Err(error) if error.contains("Git:") => {

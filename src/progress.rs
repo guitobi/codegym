@@ -1,6 +1,8 @@
+use crate::coach::Question;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 const DAY: u64 = 86_400;
@@ -18,12 +20,32 @@ pub struct TopicProgress {
     pub next_due: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryCard {
+    pub repo: String,
+    pub branch: String,
+    pub question: Question,
+    /// Hash of code shown when the card was created; prevents stale reviews.
+    pub source_hash: u64,
+    pub next_due: u64,
+    pub streak: u32,
+    pub attempts: u32,
+}
+
+pub fn source_hash(code: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    code.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Store {
     pub version: u32,
     pub topics: BTreeMap<String, TopicProgress>,
     #[serde(default)]
     pub lesson_pages: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub cards: BTreeMap<String, MemoryCard>,
 }
 
 fn data_file() -> Result<PathBuf, String> {
@@ -39,6 +61,84 @@ fn data_file() -> Result<PathBuf, String> {
 }
 
 impl Store {
+    fn card_key(repo: &Path, branch: &str, q: &Question) -> String {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        repo.to_string_lossy().hash(&mut hasher);
+        branch.hash(&mut hasher);
+        q.source_path.hash(&mut hasher);
+        q.source_line.hash(&mut hasher);
+        q.question.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    pub fn remember_answer(
+        &mut self,
+        repo: &Path,
+        branch: &str,
+        question: &Question,
+        snippet: &str,
+        score: u8,
+    ) {
+        self.remember_at(repo, branch, question, snippet, score, now());
+    }
+
+    fn remember_at(
+        &mut self,
+        repo: &Path,
+        branch: &str,
+        question: &Question,
+        snippet: &str,
+        score: u8,
+        timestamp: u64,
+    ) {
+        let key = Self::card_key(repo, branch, question);
+        if score >= 4 && !self.cards.contains_key(&key) {
+            return;
+        }
+        let card = self.cards.entry(key.clone()).or_insert_with(|| MemoryCard {
+            repo: repo.to_string_lossy().into_owned(),
+            branch: branch.to_owned(),
+            question: question.clone(),
+            source_hash: source_hash(snippet),
+            next_due: timestamp,
+            streak: 0,
+            attempts: 0,
+        });
+        card.attempts = card.attempts.saturating_add(1);
+        card.source_hash = source_hash(snippet);
+        if score >= 4 {
+            card.streak = card.streak.saturating_add(1);
+            let days =
+                REVIEW_DAYS[(card.streak.saturating_sub(1) as usize).min(REVIEW_DAYS.len() - 1)];
+            card.next_due = timestamp.saturating_add(days * DAY);
+            if card.streak >= 3 {
+                self.cards.remove(&key);
+            }
+        } else {
+            card.streak = 0;
+            card.next_due = timestamp.saturating_add(if score <= 2 { 0 } else { DAY });
+        }
+    }
+
+    pub fn due_cards(&self, repo: &Path, branch: &str) -> Vec<MemoryCard> {
+        self.due_cards_at(repo, branch, now())
+    }
+
+    fn due_cards_at(&self, repo: &Path, branch: &str, timestamp: u64) -> Vec<MemoryCard> {
+        let mut cards = self
+            .cards
+            .values()
+            .filter(|card| {
+                card.repo == repo.to_string_lossy()
+                    && card.branch == branch
+                    && card.next_due <= timestamp
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        cards.sort_by_key(|c| (c.next_due, c.attempts));
+        cards.truncate(5);
+        cards
+    }
     fn lesson_key(repo: &Path, branch: &str, mode: &str) -> String {
         format!("{} | {branch} | {mode}", repo.display())
     }
@@ -182,6 +282,12 @@ impl Store {
                 earned as f64 / total as f64
             );
         }
+        let due = self
+            .cards
+            .values()
+            .filter(|c| c.repo == repo.to_string_lossy() && c.next_due <= current)
+            .count();
+        println!("  Карток помилок до повторення: {due}. Запуск: codegym mistakes");
     }
 }
 
@@ -268,5 +374,35 @@ mod tests {
         let restored: Store =
             serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
         assert_eq!(restored.lesson_page(repo, "feature", "practice"), 2);
+    }
+
+    #[test]
+    fn remembers_specific_failed_question_and_repeats_until_mastered() {
+        let repo = Path::new("/repo");
+        let q = Question {
+            topic: "Виклики".into(),
+            question: "Навіщо await?".into(),
+            source_path: "src/code.ts".into(),
+            source_line: 3,
+            reference_answer: "Очікування".into(),
+            hint: "Promise".into(),
+            practice: None,
+        };
+        let mut store = Store::default();
+        store.remember_at(repo, "feature", &q, "code", 1, 100);
+        assert_eq!(store.due_cards_at(repo, "feature", 100).len(), 1);
+        assert!(store.due_cards_at(repo, "main", 100).is_empty());
+        for i in 0..3 {
+            let at = 100 + (i as u64) * 35 * DAY;
+            store.remember_at(repo, "feature", &q, "code", 5, at);
+        }
+        assert!(store.cards.is_empty());
+        let original = r#"{"version":1,"topics":{},"lesson_pages":{}}"#;
+        assert!(
+            serde_json::from_str::<Store>(original)
+                .unwrap()
+                .cards
+                .is_empty()
+        );
     }
 }

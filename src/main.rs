@@ -26,6 +26,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   codegym practice               Самостійно писати код
   codegym review                 Контрольна перевірка без підказок
   codegym progress               Статистика навчання
+  codegym mistakes               Повторити конкретні питання, у яких помилявся
   codegym help                   Довідка
 
 Параметри:
@@ -57,6 +58,7 @@ struct Options {
     mode: StudyMode,
     graph_symbol: Option<String>,
     show_progress: bool,
+    show_mistakes: bool,
     inspect: bool,
     repo: Option<String>,
     base: Option<String>,
@@ -73,6 +75,7 @@ fn args(items: &[String]) -> Result<Options, String> {
         mode: StudyMode::Feature,
         graph_symbol: None,
         show_progress: false,
+        show_mistakes: false,
         inspect: false,
         repo: None,
         base: None,
@@ -89,11 +92,12 @@ fn args(items: &[String]) -> Result<Options, String> {
         match items[i].as_str() {
             "help" | "-h" | "--help" => result.help = true,
             "--fresh" => result.fresh = true,
-            "feature" | "practice" | "review" | "progress" | "inspect" if !command => {
+            "feature" | "practice" | "review" | "progress" | "mistakes" | "inspect" if !command => {
                 match items[i].as_str() {
                     "practice" => result.mode = StudyMode::Practice,
                     "review" => result.mode = StudyMode::Review,
                     "progress" => result.show_progress = true,
+                    "mistakes" => result.show_mistakes = true,
                     "inspect" => result.inspect = true,
                     _ => result.mode = StudyMode::Feature,
                 }
@@ -275,6 +279,88 @@ fn ask(
     }
 }
 
+fn review_mistakes(
+    repo: &std::path::Path,
+    branch: &str,
+    mut store: progress::Store,
+    coach: Coach,
+) -> Result<(), String> {
+    use std::collections::HashSet;
+    let due = store.due_cards(repo, branch);
+    if due.is_empty() {
+        println!("Немає конкретних помилок, які потрібно повторити зараз.");
+        return Ok(());
+    }
+    println!(
+        "Повторення {} конкретних помилок без генерації нових питань.",
+        due.len()
+    );
+    let paths = due
+        .iter()
+        .map(|card| card.question.source_path.clone())
+        .collect::<HashSet<_>>();
+    let evidence = git::Evidence {
+        root: repo.to_path_buf(),
+        branch: branch.to_owned(),
+        base: "".into(),
+        context: String::new(),
+        overview: String::new(),
+        paths,
+        mode: StudyMode::Review,
+    };
+    for (index, card) in due.iter().enumerate() {
+        let q = &card.question;
+        let Some(snippet) = evidence.display_snippet(&q.source_path, q.source_line) else {
+            println!("Пропускаю застаріле джерело: {}", q.source_path);
+            continue;
+        };
+        if progress::source_hash(&snippet) != card.source_hash {
+            println!(
+                "Код {} змінився; стара картка не використовується.",
+                q.source_path
+            );
+            continue;
+        }
+        ui::question_heading(
+            index + 1,
+            due.len(),
+            &q.topic,
+            &q.source_path,
+            q.source_line,
+        );
+        let answer = ask(&coach, q, &snippet, q.practice.is_some(), false)?;
+        let score = match answer {
+            Answer::Quit => break,
+            Answer::Skip | Answer::Learn => {
+                println!("Розбір: {}", q.reference_answer);
+                0
+            }
+            Answer::Response(value) => {
+                let cap = if let Some(spec) = &q.practice {
+                    match runner::run(&value, spec) {
+                        Ok(out) if out.passed() == out.results.len() => 5,
+                        Ok(out) if out.passed() > 0 => 3,
+                        _ => 1,
+                    }
+                } else {
+                    5
+                };
+                let review = coach.evaluate(q, &snippet, &value)?;
+                let score = review.score.min(cap);
+                ui::result(score, score < review.score);
+                println!("{}", review.feedback);
+                println!("Що повторити: {}", review.what_to_improve);
+                println!("Розбір: {}", review.model_answer);
+                score
+            }
+        };
+        store.record(repo, &q.topic, score);
+        store.remember_answer(repo, branch, q, &snippet, score);
+        store.save()?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     ui::init();
     let opts = args(&std::env::args().skip(1).collect::<Vec<_>>())?;
@@ -296,6 +382,10 @@ fn run() -> Result<(), String> {
     if opts.show_progress {
         progress.print(&repo);
         return Ok(());
+    }
+    if opts.show_mistakes {
+        let branch = git::current_branch(&repo)?;
+        return review_mistakes(&repo, &branch, progress, Coach::new(opts.model));
     }
     ui::banner(env!("CARGO_PKG_VERSION"), opts.mode.title());
     println!("Репозиторій: {}", repo.display());
@@ -508,6 +598,10 @@ fn run() -> Result<(), String> {
             }
         };
         progress.record(&repo, &q.topic, score);
+        let primary = evidence
+            .display_snippet(&q.source_path, q.source_line)
+            .unwrap_or_default();
+        progress.remember_answer(&repo, &branch, q, &primary, score);
         progress.save()?;
         scores.push(score);
         lesson.next = index + 1;

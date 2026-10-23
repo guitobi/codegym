@@ -170,6 +170,101 @@ fn parse_source(path: &str, source: &str, symbol: &str) -> Vec<Hit> {
     hits
 }
 
+fn source_definitions(path: &str, source: &str) -> Vec<String> {
+    fn visit(node: Node<'_>, bytes: &[u8], results: &mut Vec<String>) {
+        if results.len() >= 12 {
+            return;
+        }
+        if let Some(name) = name_of_definition(node, bytes)
+            && name.len() >= 5
+            && !results.contains(&name)
+        {
+            results.push(name);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            visit(child, bytes, results);
+        }
+    }
+    let mut parser = Parser::new();
+    let language = if path.ends_with(".tsx") {
+        tree_sitter_typescript::LANGUAGE_TSX
+    } else {
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT
+    };
+    if parser.set_language(&language.into()).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    let mut results = Vec::new();
+    visit(tree.root_node(), source.as_bytes(), &mut results);
+    results
+}
+
+#[derive(Debug, Default)]
+pub struct Related {
+    pub summary: String,
+    pub hits: Vec<Hit>,
+}
+
+/// Collect bounded call-site evidence for functions defined in changed source.
+/// Candidate call-sites are explicitly NOT semantic type-resolved references.
+pub fn related_callers(root: &Path, changed: &[String]) -> Related {
+    let mut related = Related::default();
+    let Ok(root) = fs::canonicalize(root) else {
+        return related;
+    };
+    let root = root.as_path();
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    for file in changed {
+        let Some(path) = safe_file(root, file) else {
+            continue;
+        };
+        let Ok(source) = fs::read_to_string(path) else {
+            continue;
+        };
+        for symbol in source_definitions(file, &source) {
+            if seen.insert(symbol.clone()) {
+                candidates.push((file.clone(), symbol));
+            }
+            if candidates.len() >= 3 {
+                break;
+            }
+        }
+        if candidates.len() >= 3 {
+            break;
+        }
+    }
+    let original = changed.iter().collect::<HashSet<_>>();
+    let mut paths = HashSet::new();
+    for (declared_in, symbol) in candidates {
+        let Ok(graph) = analyze(root, &symbol) else {
+            continue;
+        };
+        for hit in graph.hits {
+            if hit.kind != Kind::Call
+                || original.contains(&hit.path)
+                || !paths.insert(hit.path.clone())
+            {
+                continue;
+            }
+            related.summary.push_str(&format!(
+                "Функція {symbol} із {declared_in} може викликатися з {}:{}{} (за іменем, потребує перевірки імпортів).\n",
+                hit.path, hit.line,
+                hit.owner.as_deref().map_or(String::new(), |v| format!(" у {v}"))
+            ));
+            related.hits.push(hit);
+            if related.hits.len() >= 3 {
+                return related;
+            }
+        }
+    }
+    related
+}
+
 pub fn analyze(root: &Path, symbol: &str) -> Result<Graph, String> {
     if symbol.is_empty()
         || symbol.len() > 120
@@ -179,8 +274,10 @@ pub fn analyze(root: &Path, symbol: &str) -> Result<Graph, String> {
     {
         return Err("Назва функції містить неприпустимі символи.".into());
     }
+    let root = fs::canonicalize(root)
+        .map_err(|error| format!("Не можу визначити корінь репозиторію: {error}"))?;
     let result = Command::new("git")
-        .current_dir(root)
+        .current_dir(&root)
         .args(["ls-files", "-z", "--", "*.ts", "*.tsx"])
         .output()
         .map_err(|e| format!("Git ls-files: {e}"))?;
@@ -203,7 +300,7 @@ pub fn analyze(root: &Path, symbol: &str) -> Result<Graph, String> {
         let Ok(name) = std::str::from_utf8(name) else {
             continue;
         };
-        let Some(path) = safe_file(root, name) else {
+        let Some(path) = safe_file(&root, name) else {
             continue;
         };
         let Ok(source) = fs::read_to_string(path) else {
@@ -325,6 +422,66 @@ mod tests {
     fn works_in_tsx() {
         let sample = "export const Page = () => <button onClick={() => calculate()}>Hi</button>;";
         assert_eq!(parse_source("page.tsx", sample, "calculate").len(), 1);
+    }
+
+    #[test]
+    fn extracts_definitions_for_context_expansion() {
+        let source = "export function calculateDays(x: number) { return x; }\nconst callLeave = (x: number) => calculateDays(x);";
+        let names = source_definitions("src/service.ts", source);
+        assert!(names.contains(&"calculateDays".to_owned()));
+        assert!(names.contains(&"callLeave".to_owned()));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn includes_calls_from_unchanged_files_in_git_index() {
+        let root = std::env::temp_dir().join(format!(
+            "codegym-graph-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        let result = (|| -> Result<(), String> {
+            let init = Command::new("git")
+                .current_dir(&root)
+                .args(["init", "-q"])
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !init.success() {
+                return Err("git init failed".into());
+            }
+            fs::write(
+                root.join("src/logic.ts"),
+                "export function calculateDays(days: number): number { return days + 1; }\n",
+            )
+            .map_err(|e| e.to_string())?;
+            fs::write(root.join("src/route.ts"),
+                "import { calculateDays } from './logic';\nexport function handler() { return calculateDays(3); }\n")
+                .map_err(|e| e.to_string())?;
+            let add = Command::new("git")
+                .current_dir(&root)
+                .args(["add", "src/logic.ts", "src/route.ts"])
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !add.success() {
+                return Err("git add failed".into());
+            }
+            let found = related_callers(&root, &["src/logic.ts".to_owned()]);
+            if found
+                .hits
+                .iter()
+                .any(|hit| hit.path == "src/route.ts" && hit.line == 2)
+            {
+                Ok(())
+            } else {
+                Err(format!("Caller wasn't located: {:?}", found.hits))
+            }
+        })();
+        let _ = fs::remove_dir_all(&root);
+        result.unwrap();
     }
 
     #[test]

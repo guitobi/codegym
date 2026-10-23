@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -418,7 +418,7 @@ pub fn gather(
     } else {
         branch_and_base(repo, base_override)?
     };
-    let (files, overview) = match &mode {
+    let (mut files, mut overview) = match &mode {
         StudyMode::Function(symbol) => function_sources(repo, symbol)?,
         _ => {
             let files = changed_files(repo, &ancestor)?;
@@ -433,6 +433,23 @@ pub fn gather(
         }
     };
 
+    let mut related_line = HashMap::new();
+    if !matches!(mode, StudyMode::Function(_)) {
+        let related = crate::graph::related_callers(repo, &files);
+        if !related.hits.is_empty() {
+            overview.push_str("\nМОЖЛИВІ ВИКЛИКИ З НЕЗМІНЕНИХ ФАЙЛІВ:\n");
+            overview.push_str(&related.summary);
+            let mut position = files.len().min(7);
+            for hit in related.hits {
+                if !files.contains(&hit.path) {
+                    related_line.insert(hit.path.clone(), hit.line);
+                    files.insert(position, hit.path);
+                    position += 1;
+                }
+            }
+            files.truncate(14);
+        }
+    }
     let mut context = format!(
         "РЕЖИМ: {}\nГілка: {branch}\nБаза: {base} (merge-base {ancestor})\n{overview}\n",
         mode.title()
@@ -455,6 +472,7 @@ pub fn gather(
                     })
                 })
                 .map_or(1, |i| i + 1),
+            _ if related_line.contains_key(path) => related_line[path],
             _ => git(
                 repo,
                 &["diff", "--unified=0", &ancestor, "HEAD", "--", path],

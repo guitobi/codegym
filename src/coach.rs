@@ -13,6 +13,8 @@ pub struct Question {
     pub source_line: usize,
     pub reference_answer: String,
     pub hint: String,
+    #[serde(default)]
+    pub practice: Option<crate::runner::Spec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +58,35 @@ const QUESTIONS_SCHEMA: &str = r#"{
       "hint":{"type":"string"}
     },
     "required":["topic","question","source_path","source_line","reference_answer","hint"]
+  }}},
+  "required":["questions"]
+}"#;
+
+const PRACTICE_SCHEMA: &str = r#"{
+  "type":"object","additionalProperties":false,
+  "properties":{"questions":{"type":"array","items":{
+    "type":"object","additionalProperties":false,
+    "properties":{
+      "topic":{"type":"string"},
+      "question":{"type":"string"},
+      "source_path":{"type":"string"},
+      "source_line":{"type":"integer"},
+      "reference_answer":{"type":"string"},
+      "hint":{"type":"string"},
+      "practice":{
+        "type":"object","additionalProperties":false,
+        "properties":{
+          "function_name":{"type":"string"},
+          "tests":{"type":"array","items":{
+            "type":"object","additionalProperties":false,
+            "properties":{"input":{"type":"array","items":{}},"expected":{}},
+            "required":["input","expected"]
+          }}
+        },
+        "required":["function_name","tests"]
+      }
+    },
+    "required":["topic","question","source_path","source_line","reference_answer","hint","practice"]
   }}},
   "required":["questions"]
 }"#;
@@ -202,7 +233,7 @@ impl Coach {
         allowed.sort();
 
         let learning = if matches!(evidence.mode, crate::git::StudyMode::Practice) {
-            "Це практичний режим. У КОЖНОМУ питанні вимагай самостійно написати невеликий фрагмент коду, тест або виправлення з чіткими вхідними/вихідними умовами. Не проси редагувати робочий репозиторій."
+            "Це практичний режим із РЕАЛЬНИМИ виконуваними тестами! У кожному питанні проси написати самостійну ЧИСТУ JavaScript-функцію (без TS-анотацій типів, імпортів, require, async, Date, мережі, файлової системи, запуску скриптів). Завдання має бути натхнене реальним уривком, але бути самодостатнім. Вкажи точну назву функції, контракт, параметри й очікувані результати. Питання має вимагати ЛИШЕ код цієї функції — не проси одночасно пояснення словами! Поле practice ОБОВ'ЯЗКОВЕ: function_name — точна проста назва функції, tests — 3–5 коректних детермінованих випадків із JSON input (масив аргументів) і JSON expected (очікуване значення). Підбери в тому числі крайні випадки. Перевір подумки кожен expected. Без побічних ефектів. Учень подає весь код function NAME(...) {...} або const NAME = (...) => ...;."
         } else if matches!(evidence.mode, crate::git::StudyMode::Review) {
             "Це незалежний іспит. Завдання конкретні, без навідних пояснень."
         } else {
@@ -241,7 +272,15 @@ impl Coach {
             allowed.join("\n"),
             evidence.context
         );
-        let value = self.codex(&prompt, QUESTIONS_SCHEMA)?;
+        let practice_mode = matches!(evidence.mode, crate::git::StudyMode::Practice);
+        let value = self.codex(
+            &prompt,
+            if practice_mode {
+                PRACTICE_SCHEMA
+            } else {
+                QUESTIONS_SCHEMA
+            },
+        )?;
         let parsed: QuestionBatch = serde_json::from_str(&value)
             .map_err(|error| format!("Codex повернув некоректний JSON запитань: {error}"))?;
         let mut questions = parsed.questions;
@@ -252,6 +291,13 @@ impl Coach {
             return Err("Codex не сформував придатних запитань.".into());
         }
         for question in &mut questions {
+            if practice_mode {
+                let task = question
+                    .practice
+                    .as_ref()
+                    .ok_or("Codex не створив виконувані тест-кейси для практики.")?;
+                crate::runner::validate(task)?;
+            }
             let (path, line) = evidence.safe_location(&question.source_path, question.source_line);
             question.source_path = path;
             question.source_line = line;
@@ -352,6 +398,8 @@ mod tests {
         assert_eq!(evaluation["properties"]["score"]["type"], "integer");
         let tutor: serde_json::Value = serde_json::from_str(TUTOR_SCHEMA).unwrap();
         assert_eq!(tutor["properties"]["explanation"]["type"], "string");
+        let practice: serde_json::Value = serde_json::from_str(PRACTICE_SCHEMA).unwrap();
+        assert_eq!(practice["properties"]["questions"]["type"], "array");
     }
 
     #[test]

@@ -3,6 +3,7 @@ mod git;
 mod graph;
 mod imports;
 mod progress;
+mod runner;
 mod syntax;
 
 use coach::{Coach, Question};
@@ -171,7 +172,26 @@ fn ask(
     println!("\n{code}");
     println!("{}\n", question.question);
     if practice {
-        println!("Введи фрагмент коду, потім окремим рядком .done");
+        if let Some(task) = &question.practice {
+            println!(
+                "Напиши самодостатню чисту JavaScript-функцію {}.",
+                task.function_name
+            );
+            println!("Локальні тести: {} випадків, зокрема:", task.tests.len());
+            for case in task.tests.iter().take(2) {
+                println!(
+                    "  {}({}) → {}",
+                    task.function_name,
+                    case.input
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    case.expected
+                );
+            }
+        }
+        println!("Введи всю функцію на JavaScript, потім окремим рядком .done");
     }
     println!(
         "Доступно: :source {} :skip :quit",
@@ -323,6 +343,7 @@ fn run() -> Result<(), String> {
                 0
             }
             Answer::Response(answer) => {
+                let mut test_score_cap = 5;
                 if matches!(&evidence.mode, StudyMode::Practice)
                     && let Some(report) = syntax::check(&q.source_path, &answer)
                 {
@@ -341,13 +362,54 @@ fn run() -> Result<(), String> {
                         println!("Фрагмент перевірено як тіло функції.");
                     }
                 }
+                if matches!(&evidence.mode, StudyMode::Practice)
+                    && let Some(task) = &q.practice
+                {
+                    println!("Запускаю чисту функцію в ізольованому QuickJS (16 МБ, 750 мс)...");
+                    match runner::run(&answer, task) {
+                        Ok(result) => {
+                            let passed = result.passed();
+                            println!("Тести: {passed}/{} пройдено.", result.results.len());
+                            for (idx, case) in result.results.iter().enumerate() {
+                                if !case.passed {
+                                    println!(
+                                        "  Тест {}: очікувалось {}, отримано {}{}",
+                                        idx + 1,
+                                        case.expected,
+                                        case.actual,
+                                        if case.error.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(" ({})", case.error)
+                                        }
+                                    );
+                                }
+                            }
+                            if passed != result.results.len() {
+                                test_score_cap = if passed == 0 { 1 } else { 3 };
+                            }
+                        }
+                        Err(error) => {
+                            println!("Тести не запустилися або спрацював ліміт: {error}");
+                            test_score_cap = 0;
+                        }
+                    }
+                }
                 println!("Оцінюю відповідь...");
                 let result = coach.evaluate(q, &snippet, &answer)?;
-                println!("\nОцінка: {}/5", result.score);
+                let score = result.score.min(test_score_cap);
+                println!(
+                    "\nОцінка: {score}/5{}",
+                    if score < result.score {
+                        " (обмежено результатами реальних тестів)"
+                    } else {
+                        ""
+                    }
+                );
                 println!("{}", result.feedback);
                 println!("Що повторити: {}", result.what_to_improve);
                 println!("Розбір: {}", result.model_answer);
-                result.score
+                score
             }
         };
         progress.record(&repo, &q.topic, score);

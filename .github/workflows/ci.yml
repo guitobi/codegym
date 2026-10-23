@@ -22,11 +22,21 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install TypeScript for semantic resolver tests
+        run: npm install -g typescript@6.0.3
+      - name: Resolve TypeScript compiler location
+        shell: bash
+        run: echo "CODEGYM_TYPESCRIPT_PATH=$(npm root -g)/typescript" >> "$GITHUB_ENV"
       - name: Formatting
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Unit tests
         run: cargo test --locked
+        env:
+          CODEGYM_SEMANTIC_TESTS: "1"
       - name: Release build
         run: cargo build --release --locked

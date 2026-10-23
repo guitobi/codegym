@@ -284,6 +284,16 @@ fn hunk_line(text: &str) -> Option<usize> {
     None
 }
 
+/// Source locations found by the syntax/semantic graph take priority over
+/// guessing the function's name in the file: imported calls may be aliased.
+fn graph_line(overview: &str, path: &str) -> Option<usize> {
+    overview.lines().find_map(|line| {
+        let suffix = line.trim_start().strip_prefix(path)?.strip_prefix(':')?;
+        let digits: String = suffix.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse::<usize>().ok().filter(|n| *n > 0)
+    })
+}
+
 fn read_excerpt(root: &Path, path: &str, center: usize) -> Option<String> {
     if !allowed_source(path) {
         return None;
@@ -368,9 +378,16 @@ fn function_sources(
     root: &Path,
     symbol: &str,
     defined_in: Option<&str>,
+    semantic: bool,
 ) -> Result<(Vec<String>, String), String> {
     verify_symbol(symbol)?;
-    let graph = if let Some(file) = defined_in {
+    let graph = if semantic {
+        crate::semantic::analyze(
+            root,
+            symbol,
+            defined_in.ok_or("--semantic потребує --from")?,
+        )?
+    } else if let Some(file) = defined_in {
         crate::graph::analyze_scoped(root, symbol, file)?
     } else {
         crate::graph::analyze(root, symbol)?
@@ -425,6 +442,7 @@ pub fn gather(
     base_override: Option<&str>,
     defined_in: Option<&str>,
     page: usize,
+    semantic: bool,
 ) -> Result<Evidence, String> {
     let (branch, base, ancestor) = if matches!(mode, StudyMode::Function(_)) {
         let branch = git(repo, &["branch", "--show-current"])?.trim().to_owned();
@@ -434,7 +452,7 @@ pub fn gather(
         branch_and_base(repo, base_override)?
     };
     let (mut files, mut overview) = match &mode {
-        StudyMode::Function(symbol) => function_sources(repo, symbol, defined_in)?,
+        StudyMode::Function(symbol) => function_sources(repo, symbol, defined_in, semantic)?,
         _ => {
             let files = changed_files(repo, &ancestor)?;
             if files.is_empty() {
@@ -477,21 +495,23 @@ pub fn gather(
     let mut paths = HashSet::new();
     for path in &files {
         let center = match &mode {
-            StudyMode::Function(symbol) => safe_regular_file(repo, path)
-                .and_then(|target| fs::read_to_string(target).ok())
-                .and_then(|text| {
-                    text.lines().position(|line| {
-                        let markers = [
-                            format!("function {symbol}"),
-                            format!("fn {symbol}"),
-                            format!("def {symbol}"),
-                            format!("const {symbol}"),
-                            format!("{symbol}("),
-                        ];
-                        markers.iter().any(|marker| line.contains(marker))
+            StudyMode::Function(symbol) => graph_line(&overview, path).unwrap_or_else(|| {
+                safe_regular_file(repo, path)
+                    .and_then(|target| fs::read_to_string(target).ok())
+                    .and_then(|text| {
+                        text.lines().position(|line| {
+                            let markers = [
+                                format!("function {symbol}"),
+                                format!("fn {symbol}"),
+                                format!("def {symbol}"),
+                                format!("const {symbol}"),
+                                format!("{symbol}("),
+                            ];
+                            markers.iter().any(|marker| line.contains(marker))
+                        })
                     })
-                })
-                .map_or(1, |i| i + 1),
+                    .map_or(1, |i| i + 1)
+            }),
             _ if related_line.contains_key(path) => related_line[path],
             _ => git(
                 repo,
@@ -547,6 +567,14 @@ mod tests {
         assert_eq!(hunk_line("@@ -1,5 +118,2 @@\n+hi"), Some(118));
         assert_eq!(hunk_line("not a diff"), None);
         assert_eq!(hunk_line("@@ -0,0 +0,7 @@"), Some(1));
+    }
+
+    #[test]
+    fn prioritizes_real_call_location_for_import_aliases() {
+        let summary = "  src/a.ts:8 — оголошення\n  src/caller.tsx:420 — виклик із Render";
+        assert_eq!(graph_line(summary, "src/caller.tsx"), Some(420));
+        assert_eq!(graph_line(summary, "src/a.ts"), Some(8));
+        assert_eq!(graph_line(summary, "src/unseen.ts"), None);
     }
 
     #[test]

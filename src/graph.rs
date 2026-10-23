@@ -1,6 +1,7 @@
 //! Bounded syntax-aware TypeScript / TSX call-site navigation.
 //! This is a lexical symbol-reference graph, NOT semantic type resolution:
 //! same-named members can be ambiguous; imports/re-exports are not resolved.
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,13 +12,14 @@ const MAX_FILE_BYTES: u64 = 480_000;
 const MAX_TRACKED_FILES: usize = 4000;
 const MAX_MATCHES: usize = 48;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Kind {
     Definition,
     Call,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Hit {
     pub path: String,
     pub line: usize,
@@ -31,6 +33,7 @@ pub struct Graph {
     pub scanned: usize,
     pub truncated: bool,
     pub scoped: bool,
+    pub semantic: bool,
 }
 
 fn safe_file(root: &Path, name: &str) -> Option<PathBuf> {
@@ -492,10 +495,17 @@ impl Graph {
 
     pub fn description(&self, symbol: &str) -> String {
         let mut out = format!(
-            "Синтаксичний аналіз TypeScript/TSX символу {symbol}; перевірено {} файлів.\n",
+            "{} TypeScript/TSX символу {symbol}; перевірено {} файлів.\n",
+            if self.semantic {
+                "Семантичний TypeScript type-checker"
+            } else {
+                "Синтаксичний аналіз"
+            },
             self.scanned
         );
-        if self.scoped {
+        if self.semantic {
+            out.push_str("Посилання зіставлені TypeScript type-checker (імпорти, реекспорти, шляхи tsconfig). Динамічні виклики можуть залишитися невідомими.\n");
+        } else if self.scoped {
             out.push_str("Звірено прямі іменовані відносні імпорти; реекспорти, типи й затінення не розв'язано.\n");
         } else {
             out.push_str("Це кандидати за ім'ям, а не гарантована розв'язка імпортів/типів.\n");
@@ -653,6 +663,7 @@ mod tests {
             }],
             truncated: true,
             scoped: false,
+            semantic: false,
         };
         let desc = graph.description("foo");
         assert!(desc.contains("не гарантована"));

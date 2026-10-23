@@ -4,6 +4,7 @@ mod graph;
 mod imports;
 mod progress;
 mod runner;
+mod semantic;
 mod session;
 mod syntax;
 mod tui;
@@ -22,6 +23,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   codegym function NAME          Де функція реалізована та хто її викликає
   codegym graph NAME             Покажи TS/TSX граф викликів без AI
   codegym graph NAME --from PATH  Перевір відносні TS/TSX імпорти з PATH
+  codegym graph NAME --from PATH --semantic  Семантична перевірка TypeScript
   codegym inspect                Переглянути вибраний контекст без AI
   codegym feature --fresh        Почати нове заняття, відкинувши незавершене
   codegym practice               Самостійно писати код
@@ -39,6 +41,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   --questions 5                  Кількість питань (1..5)
   --model gpt-6-luna             Модель у Codex
   --tui                          Інтерактивний повноекранний термінал
+  --semantic                     TypeScript type checker (потребує Node і TypeScript, більше RAM)
 
 Команди під час заняття:
   :hint                          Підказка (крім review)
@@ -53,7 +56,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   - Жодних git fetch, commit, push, hooks або змін коду.
   - Codex отримує уривки коду та надсилає їх AI-провайдеру.
   - Codex працює без shell, MCP, hooks, web, локальних файлів проєкту.
-  - Зберігаються бали та теми, не текст коду чи відповідей.
+  - Локально зберігаються бали, запитання та AI-еталони; твої введені відповіді не зберігаються.
 "#;
 
 #[derive(Debug)]
@@ -71,6 +74,7 @@ struct Options {
     page: Option<usize>,
     fresh: bool,
     tui: bool,
+    semantic: bool,
     help: bool,
 }
 
@@ -89,6 +93,7 @@ fn args(items: &[String]) -> Result<Options, String> {
         page: None,
         fresh: false,
         tui: false,
+        semantic: false,
         help: false,
     };
     let mut i = 0;
@@ -98,6 +103,7 @@ fn args(items: &[String]) -> Result<Options, String> {
             "help" | "-h" | "--help" => result.help = true,
             "--fresh" => result.fresh = true,
             "--tui" => result.tui = true,
+            "--semantic" => result.semantic = true,
             "feature" | "practice" | "review" | "progress" | "mistakes" | "inspect" if !command => {
                 match items[i].as_str() {
                     "practice" => result.mode = StudyMode::Practice,
@@ -415,8 +421,17 @@ fn run() -> Result<(), String> {
         );
     }
     let repo = git::repository(opts.repo.as_deref())?;
+    if opts.semantic && opts.from.is_none() {
+        return Err("Для --semantic потрібно вказати --from src/path-to-definition.ts.".into());
+    }
+    if opts.semantic && opts.graph_symbol.is_none() && !matches!(opts.mode, StudyMode::Function(_))
+    {
+        return Err("--semantic зараз підтримує лише graph та function.".into());
+    }
     if let Some(symbol) = &opts.graph_symbol {
-        let graph = if let Some(file) = opts.from.as_deref() {
+        let graph = if opts.semantic {
+            semantic::analyze(&repo, symbol, opts.from.as_deref().unwrap_or(""))?
+        } else if let Some(file) = opts.from.as_deref() {
             graph::analyze_scoped(&repo, symbol, file)?
         } else {
             graph::analyze(&repo, symbol)?
@@ -448,7 +463,11 @@ fn run() -> Result<(), String> {
     let branch = git::current_branch(&repo)?;
     let mode_name = match &opts.mode {
         StudyMode::Function(name) => {
-            format!("function:{name}:{}", opts.from.as_deref().unwrap_or(""))
+            format!(
+                "function:{name}:{}:{}",
+                opts.from.as_deref().unwrap_or(""),
+                opts.semantic
+            )
         }
         _ => opts.mode.key().to_owned(),
     };
@@ -473,6 +492,7 @@ fn run() -> Result<(), String> {
         opts.base.as_deref(),
         opts.from.as_deref(),
         page,
+        opts.semantic,
     )?;
     let mut signature = if opts.inspect {
         0
@@ -493,6 +513,7 @@ fn run() -> Result<(), String> {
             opts.base.as_deref(),
             opts.from.as_deref(),
             page,
+            opts.semantic,
         )?;
         signature = session::evidence_signature(&repo, &evidence)?;
         println!("Попереднє заняття застаріло — згенерую нове за поточним кодом.");

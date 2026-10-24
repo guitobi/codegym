@@ -3,6 +3,7 @@ mod git;
 mod graph;
 mod imports;
 mod progress;
+mod provider;
 mod runner;
 mod semantic;
 mod session;
@@ -30,6 +31,7 @@ CodeGym — локальний Rust-тренажер розуміння реал
   codegym review                 Контрольна перевірка без підказок
   codegym progress               Статистика навчання
   codegym mistakes               Повторити конкретні питання, у яких помилявся
+  codegym providers              Перелік AI-провайдерів і їх налаштувань
   codegym feature --tui           Повноекранний режим із панеллю коду
   codegym help                   Довідка
 
@@ -39,7 +41,11 @@ CodeGym — локальний Rust-тренажер розуміння реал
   --page 2                       Сторінка файлів фічі (для inspect/feature/practice/review)
   --from src/module.ts           Файл визначення функції для точніших зв'язків
   --questions 5                  Кількість питань (1..5)
-  --model gpt-6-luna             Модель у Codex
+  --provider codex               AI-провайдер (codex, claude-cli, gemini-cli, openai, anthropic,
+                                  gemini, ollama, lmstudio, openrouter, ...)
+  --model MODEL                  Модель вибраного провайдера
+  --base-url URL                 Інший HTTPS API або локальний localhost HTTP
+  --api-key-env ENV_NAME         Назва змінної середовища з ключем (не сам ключ)
   --tui                          Інтерактивний повноекранний термінал
   --semantic                     TypeScript type checker (потребує Node і TypeScript, більше RAM)
 
@@ -54,8 +60,9 @@ CodeGym — локальний Rust-тренажер розуміння реал
 
 Безпека:
   - Жодних git fetch, commit, push, hooks або змін коду.
-  - Codex отримує уривки коду та надсилає їх AI-провайдеру.
-  - Codex працює без shell, MCP, hooks, web, локальних файлів проєкту.
+  - Уривки коду надсилаються вибраному AI-провайдеру.
+  - CLI-провайдери запускаються у тимчасовій папці; прямі API-запити не запускають агентів.
+  - API-ключі беруться лише зі змінних середовища.
   - Локально зберігаються бали, запитання та AI-еталони; твої введені відповіді не зберігаються.
 "#;
 
@@ -65,11 +72,15 @@ struct Options {
     graph_symbol: Option<String>,
     show_progress: bool,
     show_mistakes: bool,
+    show_providers: bool,
     inspect: bool,
     repo: Option<String>,
     base: Option<String>,
     from: Option<String>,
     model: Option<String>,
+    provider: Option<String>,
+    base_url: Option<String>,
+    api_key_env: Option<String>,
     questions: usize,
     page: Option<usize>,
     fresh: bool,
@@ -84,11 +95,15 @@ fn args(items: &[String]) -> Result<Options, String> {
         graph_symbol: None,
         show_progress: false,
         show_mistakes: false,
+        show_providers: false,
         inspect: false,
         repo: None,
         base: None,
         from: None,
         model: None,
+        provider: None,
+        base_url: None,
+        api_key_env: None,
         questions: 5,
         page: None,
         fresh: false,
@@ -104,12 +119,16 @@ fn args(items: &[String]) -> Result<Options, String> {
             "--fresh" => result.fresh = true,
             "--tui" => result.tui = true,
             "--semantic" => result.semantic = true,
-            "feature" | "practice" | "review" | "progress" | "mistakes" | "inspect" if !command => {
+            "feature" | "practice" | "review" | "progress" | "mistakes" | "inspect"
+            | "providers"
+                if !command =>
+            {
                 match items[i].as_str() {
                     "practice" => result.mode = StudyMode::Practice,
                     "review" => result.mode = StudyMode::Review,
                     "progress" => result.show_progress = true,
                     "mistakes" => result.show_mistakes = true,
+                    "providers" => result.show_providers = true,
                     "inspect" => result.inspect = true,
                     _ => result.mode = StudyMode::Feature,
                 }
@@ -131,7 +150,8 @@ fn args(items: &[String]) -> Result<Options, String> {
                 }
                 command = true;
             }
-            "--repo" | "--base" | "--model" | "--questions" | "--from" | "--page" => {
+            "--repo" | "--base" | "--model" | "--provider" | "--base-url" | "--api-key-env"
+            | "--questions" | "--from" | "--page" => {
                 let key = items[i].as_str();
                 i += 1;
                 let value = items
@@ -142,6 +162,9 @@ fn args(items: &[String]) -> Result<Options, String> {
                     "--base" => result.base = Some(value.clone()),
                     "--from" => result.from = Some(value.clone()),
                     "--model" => result.model = Some(value.clone()),
+                    "--provider" => result.provider = Some(value.clone()),
+                    "--base-url" => result.base_url = Some(value.clone()),
+                    "--api-key-env" => result.api_key_env = Some(value.clone()),
                     "--questions" => {
                         result.questions = value
                             .parse::<usize>()
@@ -423,6 +446,13 @@ fn run() -> Result<(), String> {
         println!("{HELP}");
         return Ok(());
     }
+    if opts.show_providers {
+        println!("Підтримувані AI-провайдери:\n{}", provider::NAMES);
+        let selected =
+            provider::Provider::new(opts.provider, opts.model, opts.base_url, opts.api_key_env)?;
+        println!("\nПоточний вибір:\n{}", selected.description());
+        return Ok(());
+    }
     if opts.tui && !tui::supported() {
         return Err(
             "--tui потребує інтерактивного термінала; для pipe використай стандартний режим."
@@ -455,7 +485,13 @@ fn run() -> Result<(), String> {
     }
     if opts.show_mistakes {
         let branch = git::current_branch(&repo)?;
-        return review_mistakes(&repo, &branch, progress, Coach::new(opts.model), opts.tui);
+        return review_mistakes(
+            &repo,
+            &branch,
+            progress,
+            Coach::new(opts.provider, opts.model, opts.base_url, opts.api_key_env)?,
+            opts.tui,
+        );
     }
     ui::banner(env!("CARGO_PKG_VERSION"), opts.mode.title());
     println!("Репозиторій: {}", repo.display());
@@ -544,16 +580,20 @@ fn run() -> Result<(), String> {
         println!("Обсяг контексту: {} байтів.", evidence.context.len());
         return Ok(());
     }
-    let coach = Coach::new(opts.model);
+    let coach = Coach::new(opts.provider, opts.model, opts.base_url, opts.api_key_env)?;
     let mut lesson = if let Some(pending) = resumed.take() {
         println!(
-            "Відновлено заняття з питання {} із {} — без повторного виклику Codex.",
+            "Відновлено заняття з питання {} із {} — без повторного виклику AI.",
             pending.next + 1,
             pending.questions.len()
         );
         pending
     } else {
-        println!("Генерую {} питань через Codex...", opts.questions);
+        println!(
+            "Генерую {} питань через {}...",
+            opts.questions,
+            coach.provider.description()
+        );
         let weak_topics = progress.weak_topics(&repo);
         if !weak_topics.is_empty() {
             println!("Повторимо слабкі теми: {}", weak_topics.join(", "));
@@ -786,5 +826,26 @@ mod tests {
         let opts = args(&["inspect".into(), "--page".into(), "3".into()]).unwrap();
         assert_eq!(opts.page, Some(3));
         assert!(args(&["--page".into(), "0".into()]).is_err());
+    }
+
+    #[test]
+    fn parses_provider_model_and_connection_overrides() {
+        let opts = args(&[
+            "practice".into(),
+            "--provider".into(),
+            "openai-compatible".into(),
+            "--model".into(),
+            "local-code-model".into(),
+            "--base-url".into(),
+            "http://127.0.0.1:1234/v1".into(),
+            "--api-key-env".into(),
+            "MY_MODEL_KEY".into(),
+        ])
+        .unwrap();
+        assert_eq!(opts.provider.as_deref(), Some("openai-compatible"));
+        assert_eq!(opts.model.as_deref(), Some("local-code-model"));
+        assert_eq!(opts.base_url.as_deref(), Some("http://127.0.0.1:1234/v1"));
+        assert_eq!(opts.api_key_env.as_deref(), Some("MY_MODEL_KEY"));
+        assert!(args(&["providers".into()]).unwrap().show_providers);
     }
 }

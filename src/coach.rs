@@ -1,9 +1,6 @@
 use crate::git::Evidence;
+use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io::Write;
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Question {
@@ -103,124 +100,23 @@ const EVALUATION_SCHEMA: &str = r#"{
 }"#;
 
 pub struct Coach {
-    pub model: String,
+    pub provider: Provider,
 }
 
 impl Coach {
-    pub fn new(model: Option<String>) -> Self {
-        Self {
-            model: model
-                .or_else(|| std::env::var("CODEGYM_MODEL").ok())
-                .unwrap_or_else(|| "gpt-6-luna".into()),
-        }
+    pub fn new(
+        provider: Option<String>,
+        model: Option<String>,
+        url: Option<String>,
+        api_key_env: Option<String>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            provider: Provider::new(provider, model, url, api_key_env)?,
+        })
     }
 
-    fn codex(&self, prompt: &str, schema: &str) -> Result<String, String> {
-        let number = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("codegym-{}-{number}", std::process::id()));
-        fs::create_dir(&dir).map_err(|e| format!("Не можу створити тимчасову папку: {e}"))?;
-        let result = self.call_codex(prompt, schema, &dir);
-        let _ = fs::remove_dir_all(&dir);
-        result
-    }
-
-    fn call_codex(
-        &self,
-        prompt: &str,
-        schema: &str,
-        dir: &std::path::Path,
-    ) -> Result<String, String> {
-        let schema_path = dir.join("schema.json");
-        let output_path = dir.join("answer.json");
-        fs::write(&schema_path, schema).map_err(|e| e.to_string())?;
-
-        // Unlike starting Codex in the target repo, the model gets NO repository
-        // tools, rules, shell, or MCP services. All source evidence is passed as text.
-        let executable = std::env::var("CODEGYM_CODEX_BIN").unwrap_or_else(|_| {
-            if cfg!(windows) {
-                "codex.cmd".into()
-            } else {
-                "codex".into()
-            }
-        });
-        let mut process = Command::new(executable);
-        process
-            .current_dir(dir)
-            .arg("exec")
-            .args([
-                "--ephemeral",
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--color",
-                "never",
-                "--output-schema",
-            ])
-            .arg(schema_path.as_os_str())
-            .arg("--output-last-message")
-            .arg(output_path.as_os_str());
-        for setting in [
-            "approval_policy=\"never\"",
-            "features.hooks=false",
-            "features.shell_tool=false",
-            "features.shell_snapshot=false",
-            "features.multi_agent=false",
-            "features.apps=false",
-            "features.remote_plugin=false",
-            "features.memories=false",
-            "features.goals=false",
-            "web_search=\"disabled\"",
-            "mcp_servers={}",
-            "project_doc_max_bytes=0",
-            "model_reasoning_effort=\"low\"",
-        ] {
-            process.arg("-c").arg(setting);
-        }
-        process
-            .arg("--model")
-            .arg(&self.model)
-            .arg("-")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-
-        let mut child = process.spawn().map_err(|error| {
-            format!("Не можу запустити Codex CLI ({error}). Перевір 'codex login status' і PATH.")
-        })?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(prompt.as_bytes())
-                .map_err(|error| format!("Помилка надсилання запиту до Codex: {error}"))?;
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|error| format!("Codex не завершився: {error}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "Codex повернув помилку ({}): {}",
-                output.status,
-                stderr
-                    .chars()
-                    .rev()
-                    .take(700)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-            ));
-        }
-        let metadata = fs::metadata(&output_path)
-            .map_err(|_| "Codex не створив відповідь JSON.".to_owned())?;
-        if metadata.len() > 250_000 {
-            return Err("Codex повернув надто велику відповідь.".into());
-        }
-        fs::read_to_string(output_path).map_err(|error| error.to_string())
+    fn complete(&self, prompt: &str, schema: &str) -> Result<String, String> {
+        self.provider.generate(prompt, schema)
     }
 
     pub fn questions(
@@ -280,9 +176,9 @@ impl Coach {
         };
         let mut correction = String::new();
         for attempt in 1..=2 {
-            let value = self.codex(&format!("{prompt}\n{correction}"), schema)?;
+            let value = self.complete(&format!("{prompt}\n{correction}"), schema)?;
             let parsed: QuestionBatch = serde_json::from_str(&value)
-                .map_err(|error| format!("Codex повернув некоректний JSON запитань: {error}"))?;
+                .map_err(|error| format!("AI повернув некоректний JSON запитань: {error}"))?;
             let mut questions = parsed.questions;
             questions.truncate(amount);
             match Self::validate_questions(evidence, amount, practice_mode, &mut questions) {
@@ -384,9 +280,9 @@ what_to_improve (що повторити або спробувати), model_ans
             question.reference_answer,
             answer.chars().take(14_000).collect::<String>(),
         );
-        let output = self.codex(&prompt, EVALUATION_SCHEMA)?;
+        let output = self.complete(&prompt, EVALUATION_SCHEMA)?;
         let mut feedback: Evaluation = serde_json::from_str(&output)
-            .map_err(|error| format!("Codex повернув некоректну оцінку: {error}"))?;
+            .map_err(|error| format!("AI повернув некоректну оцінку: {error}"))?;
         feedback.score = feedback.score.min(5);
         Ok(feedback)
     }
@@ -422,9 +318,9 @@ what_to_improve (що повторити або спробувати), model_ans
 КІНЕЦЬ ДАНИХ."#,
             question.question, question.source_path, question.source_line, source, student_query
         );
-        let response = self.codex(&prompt, TUTOR_SCHEMA)?;
+        let response = self.complete(&prompt, TUTOR_SCHEMA)?;
         serde_json::from_str(&response)
-            .map_err(|error| format!("Codex повернув некоректне пояснення: {error}"))
+            .map_err(|error| format!("AI повернув некоректне пояснення: {error}"))
     }
 }
 

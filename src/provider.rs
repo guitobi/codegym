@@ -97,7 +97,7 @@ fn preset(name: &str) -> Option<(Kind, &'static str, &'static str, &'static str)
             "https://api.together.xyz/v1",
             "TOGETHER_API_KEY",
         ),
-        "openai-compatible" | "custom" => (Kind::Compatible, "", "", "CODEGYM_API_KEY"),
+        "openai-compatible" | "custom" => (Kind::Compatible, "", "", ""),
         _ => return None,
     })
 }
@@ -581,6 +581,28 @@ mod tests {
         assert!(validate_url("https://example.org/v1").is_ok());
         assert!(validate_url("http://127.0.0.1:11434/v1").is_ok());
         assert!(validate_url("https://user:secret@example.org/v1").is_err());
+    }
+
+    #[test]
+    fn custom_local_endpoint_does_not_require_an_api_key() {
+        let local = Provider::new(
+            Some("openai-compatible".into()),
+            Some("local-model".into()),
+            Some("http://127.0.0.1:1234/v1".into()),
+            Some(String::new()),
+        )
+        .unwrap();
+        assert!(local.key_env.is_empty());
+        assert!(local.description().contains("not required"));
+        assert!(
+            Provider::new(
+                Some("openai-compatible".into()),
+                Some("model".into()),
+                Some("http://remote.example.com/v1".into()),
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]

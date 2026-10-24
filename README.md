@@ -10,7 +10,7 @@ It provides syntax-aware code excerpts, progress indicators, and optional full-s
 
 - Rust toolchain (Cargo)
 - Git
-- Codex CLI, signed in (check with `codex login status`)
+- At least one AI provider: Codex CLI, Claude CLI, Gemini CLI, a supported cloud API, or a local OpenAI-compatible model server. Only Codex is used by default.
 - Optional: Node.js and TypeScript for `--semantic` (see [TypeScript call graphs](#typescript-call-graphs))
 
 Build and install from PowerShell:
@@ -55,7 +55,7 @@ codegym inspect --page 2            # Preview a different section without consum
 codegym feature --fresh             # Discard an unfinished lesson and generate a new one
 ```
 
-Common options: `--base origin/main`, `--questions 1..5`, `--page N`, `--model MODEL`, `--from path/to/file.ts`, `--tui`, and `--semantic`. The default model is `gpt-6-luna`; override it with `--model` or the `CODEGYM_MODEL` environment variable.
+Common options: `--base origin/main`, `--questions 1..5`, `--page N`, `--provider PROVIDER`, `--model MODEL`, `--base-url URL`, `--api-key-env NAME`, `--from path/to/file.ts`, `--tui`, and `--semantic`. The default provider is `codex`, whose default model is `gpt-6-luna`; other providers have their own defaults.
 
 ### Lesson controls
 
@@ -78,12 +78,57 @@ In **full-screen mode** (`--tui`): F1 = hint, F2 = tutor, F3 = explanation, F4 =
 1. **Determine the changed code.** CodeGym uses local Git and the merge base of the selected base branch. It includes staged and unstaged changes to tracked files, without fetching remote refs.
 2. **Select representative source files.** It chooses up to 14 tracked source files at a time, aiming for architectural breadth (services, database, API, UI, and tests). After successfully generating a lesson, it advances the saved file-page cursor, so subsequent sessions cover other parts of the feature. `inspect` only previews a page; explicit `--page N` does not advance the cursor.
 3. **Include relevant callers.** For TypeScript/TSX, a bounded Tree-sitter analysis can add call-site examples from unchanged files. This helps connect a modified function to the rest of the application.
-4. **Generate and validate questions.** Codex receives up to approximately 40 KB of selected excerpts and generates source-linked Ukrainian questions. CodeGym verifies that referenced files and line numbers exist. If a set is invalid, it makes one correction attempt; after another failure, it refuses to present unreliable questions.
-5. **Evaluate answers.** Codex checks your explanation against the reference answer, rates it from 0 to 5, and provides feedback. Its judgment is not infallible.
+4. **Generate and validate questions.** The selected AI provider receives up to approximately 40 KB of selected excerpts and generates source-linked Ukrainian questions. CodeGym verifies that referenced files and line numbers exist. If a set is invalid, it makes one correction attempt; after another failure, it refuses to present unreliable questions.
+5. **Evaluate answers.** The selected AI model checks your explanation against the reference answer, rates it from 0 to 5, and provides feedback. Its judgment is not infallible.
 6. **Remember and revisit.** Per-topic results and individual missed-question cards are stored locally. Review intervals for successful topic answers progress through 1, 3, 7, 14, and 30 days; weaker responses are scheduled earlier.
 7. **Resume interrupted sessions.** Unfinished questions are stored outside the repository and restored after `:quit` or a restart, without regenerating the lesson. The saved session is invalidated when the relevant Git context changes. Use `--fresh` to start again.
 
 CodeGym **does not** run `git fetch`, `git commit`, `git push`, Git hooks, or repository build scripts as part of a lesson. It does not edit your project files.
+
+## AI providers
+
+CodeGym no longer depends exclusively on Codex. The same learning workflow (question generation, grading, and tutoring) uses the provider selected with `--provider`. Codex is still the default for backward compatibility.
+
+Run `codegym providers` to see all presets and the currently selected provider. Use `--model` to select an available model for that provider:
+
+```powershell
+codegym feature --provider codex --model gpt-6-luna
+codegym feature --provider claude-cli --model sonnet
+codegym practice --provider gemini-cli --model gemini-2.5-flash
+
+# Cloud APIs: keys are taken from environment variables, not command arguments.
+$env:OPENAI_API_KEY = 'YOUR_KEY'
+codegym feature --provider openai --model gpt-6
+$env:ANTHROPIC_API_KEY = 'YOUR_KEY'
+codegym review --provider anthropic --model claude-sonnet-4-5
+$env:GEMINI_API_KEY = 'YOUR_KEY'
+codegym feature --provider gemini --model gemini-2.5-flash
+
+# OpenAI-compatible cloud providers:
+$env:OPENROUTER_API_KEY = 'YOUR_KEY'
+codegym feature --provider openrouter --model 'provider/model-name'
+$env:DEEPSEEK_API_KEY = 'YOUR_KEY'
+codegym feature --provider deepseek --model deepseek-chat
+
+# Local OpenAI-compatible servers (no API key needed):
+codegym feature --provider ollama --model llama3.2
+codegym practice --provider lmstudio --model local-model
+codegym feature --provider openai-compatible --base-url http://127.0.0.1:1234/v1 --model my-model
+
+# Custom remote API with a key stored in MY_API_KEY:
+$env:MY_API_KEY = 'YOUR_KEY'
+codegym feature --provider openai-compatible --base-url https://api.example.com/v1 --model my-model --api-key-env MY_API_KEY
+```
+
+**Presets:** `codex`, `claude-cli`, `gemini-cli`, `openai`, `anthropic` (`claude`), `gemini` (`google`), `openai-compatible` (`custom`), `ollama`, `lmstudio`, `openrouter`, `groq`, `deepseek`, `mistral`, `xai`, `together`. Other services exposing an OpenAI-compatible Chat Completions endpoint can use `openai-compatible` and a custom `--base-url`; not every proprietary API is universally compatible.
+
+**Configuration precedence:** CLI arguments override `CODEGYM_PROVIDER`, `CODEGYM_MODEL`, `CODEGYM_BASE_URL`, and `CODEGYM_API_KEY_ENV`, which override provider defaults. `--api-key-env` specifies the **name** of an environment variable, not the key value. Store keys in your shell/OS environment or a secure secret manager; do not put them in Git or CodeGym arguments. API keys are never persisted in CodeGym progress or session files. Models and endpoint support vary by provider: you may need to choose a different available model with `--model`.
+
+**CLI authentication:** `codex`, `claude-cli`, and `gemini-cli` use the respective installed CLI and its existing login. CLI subprocesses run from a disposable directory. Codex disables tools, extensions, and MCP in its session; Claude CLI disables tools; Gemini CLI runs in read-only plan mode with extensions disabled. CLI-level agent security and home-directory configuration are provider-specific; these are not equivalent to a complete OS sandbox. For stricter isolation, prefer direct HTTP API providers.
+
+**Privacy:** snippets from your local repository are transmitted to the **selected** model service, including when using a cloud API or authenticated CLI. The local Ollama/LM Studio presets use HTTP on localhost, but verify your server's own configuration. Remote API endpoints require HTTPS; plain HTTP is accepted only on localhost. The default Rust CLI remains lightweight, but CLI agents and local language models consume additional RAM.
+
+All backends return a JSON object. CodeGym validates that the JSON can be parsed and checks question sources, answers, and generated executable practice tests. Some OpenAI-compatible providers do not implement strict JSON schema output and may fail if their model cannot follow the required JSON format. No model/provider is automatically substituted after an error.
 
 ## TypeScript call graphs
 
@@ -112,7 +157,7 @@ If TypeScript cannot be found, set `CODEGYM_TYPESCRIPT_PATH` to the directory of
 
 ## Coding practice and executable tests
 
-In `codegym practice`, Codex generates a self-contained **pure JavaScript function** exercise inspired by the selected source code, along with 3–5 deterministic test cases and a reference solution.
+In `codegym practice`, the selected AI provider generates a self-contained **pure JavaScript function** exercise inspired by the selected source code, along with 3–5 deterministic test cases and a reference solution.
 
 Before presenting the exercise, CodeGym runs the reference solution against all generated cases. If they disagree, the exercise is regenerated once or rejected. This checks internal consistency, **not** the correctness of the AI-generated requirements themselves.
 
@@ -122,14 +167,14 @@ The QuickJS runtime exposes no host file-system, networking, shell, or project-a
 
 ## Storage, performance, and privacy
 
-- **Low overhead by default:** the Rust CLI has no browser window, background daemon, application server, or database service. AI requests start a separate Codex process only when needed.
+- **Low overhead by default:** the Rust CLI has no browser window, background daemon, application server, or database service. CLI providers start on demand; HTTP providers use a direct client. External AI processes and local models can consume substantial RAM.
 - **Local data:** `%LOCALAPPDATA%\codegym\progress.json` stores progress statistics **and missed-question cards with question text and model answers**. `%LOCALAPPDATA%\codegym\sessions` stores unfinished lessons. Your typed answers are not persisted, but model answers can include excerpts from proprietary code. Treat these files as confidential.
-- **AI data disclosure:** selected code excerpts are sent to the AI provider configured in Codex. Follow your organization's policies before using CodeGym on private or corporate repositories.
+- **AI data disclosure:** selected code excerpts are sent to your selected AI provider. Follow your organization's policies before using CodeGym on private or corporate repositories.
 - **Source filters:** hidden files, dependency/build directories, and filenames containing `secret` or `credential` are excluded by the source collector. These exclusions **do not guarantee** that other files are free from secrets and are not a DLP solution.
-- **Codex isolation:** CodeGym invokes Codex from a temporary directory in read-only mode, with shell tools, MCP, hooks, web search, and agent extensions disabled. Source evidence is passed as text instead of mounting the target repository as Codex's workspace.
+- **Provider isolation:** CodeGym does not give direct API models any local tools or filesystem access. CLI models are launched from a temporary directory and configured to limit agent tools, but their own clients may still have access to user-level settings and credentials. Source evidence is passed as text; the target repository is not mounted as their workspace.
 - **No application telemetry or automatic updater** is implemented.
 
-Memory figures for the lightweight `inspect` and `graph` modes should not be confused with the combined RAM consumption of Codex or the optional TypeScript semantic checker.
+Memory figures for `inspect` and `graph` should not be confused with the additional RAM consumed by CLI agents, local model servers, or the optional TypeScript semantic checker.
 
 ## Development and CI
 

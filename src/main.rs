@@ -16,54 +16,53 @@ use git::StudyMode;
 use std::io::{self, Write};
 
 const HELP: &str = r#"
-CodeGym — локальний Rust-тренажер розуміння реального коду
+CodeGym — a lightweight Rust trainer for understanding real repository code
 
-Команди:
-  codegym                        Розібрати зміни поточної гілки
-  codegym feature                Архітектура фічі, функції, виклики, крайні випадки
-  codegym function NAME          Де функція реалізована та хто її викликає
-  codegym graph NAME             Покажи TS/TSX граф викликів без AI
-  codegym graph NAME --from PATH  Перевір відносні TS/TSX імпорти з PATH
-  codegym graph NAME --from PATH --semantic  Семантична перевірка TypeScript
-  codegym inspect                Переглянути вибраний контекст без AI
-  codegym feature --fresh        Почати нове заняття, відкинувши незавершене
-  codegym practice               Самостійно писати код
-  codegym review                 Контрольна перевірка без підказок
-  codegym progress               Статистика навчання
-  codegym mistakes               Повторити конкретні питання, у яких помилявся
-  codegym providers              Перелік AI-провайдерів і їх налаштувань
-  codegym feature --tui           Повноекранний режим із панеллю коду
-  codegym help                   Довідка
+Commands:
+  codegym                         Study changes on the current Git branch
+  codegym feature                 Explore feature architecture, functions, calls, and edge cases
+  codegym function NAME           Study a function and its call sites
+  codegym graph NAME              Inspect a TypeScript/TSX call graph without AI
+  codegym graph NAME --from PATH  Verify relative TypeScript/TSX imports
+  codegym graph NAME --from PATH --semantic  Resolve references with TypeScript type checker
+  codegym inspect                 Preview the selected files without AI
+  codegym feature --fresh         Discard an unfinished lesson and start over
+  codegym practice                Write code and run executable tests
+  codegym review                  Take an assessment without hints
+  codegym progress                Show learning statistics and review schedule
+  codegym mistakes                Review individual questions you missed
+  codegym providers               List available AI providers and current configuration
+  codegym feature --tui           Use the full-screen terminal interface
+  codegym help                    Show this help
 
-Параметри:
-  --repo "ШЛЯХ"                  Шлях до Git-репозиторію
-  --base origin/main             База порівняння; лише локальні Git-ref
-  --page 2                       Сторінка файлів фічі (для inspect/feature/practice/review)
-  --from src/module.ts           Файл визначення функції для точніших зв'язків
-  --questions 5                  Кількість питань (1..5)
-  --provider codex               AI-провайдер (codex, claude-cli, gemini-cli, openai, anthropic,
-                                  gemini, ollama, lmstudio, openrouter, ...)
-  --model MODEL                  Модель вибраного провайдера
-  --base-url URL                 Інший HTTPS API або локальний localhost HTTP
-  --api-key-env ENV_NAME         Назва змінної середовища з ключем (не сам ключ)
-  --tui                          Інтерактивний повноекранний термінал
-  --semantic                     TypeScript type checker (потребує Node і TypeScript, більше RAM)
+Options:
+  --repo "PATH"                   Path to a local Git repository
+  --base origin/main              Comparison base (local Git refs only)
+  --page 2                        Feature file page (inspect/feature/practice/review)
+  --from src/module.ts            File containing a function definition
+  --questions 5                   Number of questions (1..5)
+  --provider codex                AI backend (Codex, Claude, Gemini, Ollama, OpenRouter, etc.)
+  --model MODEL                   Model used by the selected provider
+  --base-url URL                  Custom HTTPS endpoint or localhost HTTP endpoint
+  --api-key-env ENV_NAME          Environment variable NAME holding the key (not the key)
+  --tui                           Full-screen terminal mode (requires a TTY)
+  --semantic                      Use TypeScript checker (requires Node and extra RAM)
 
-Команди під час заняття:
-  :hint                          Підказка (крім review)
-  :ask ЧОМУ ...                 Запитати AI-викладача про конкретний код
-  :source                        Повторити код
-  :learn                         Відразу побачити розбір (0 балів)
-  :skip                          Пропустити (0 балів)
-  :quit                          Завершити заняття
-  .done                          Закінчити багаторядкову відповідь у practice
+In-lesson commands:
+  :hint                           Show a hint (unavailable during review)
+  :ask WHY ...                    Ask the AI tutor about this code
+  :source                         Show the source excerpt again
+  :learn                          Reveal the explanation (0 points)
+  :skip                           Skip the question (0 points)
+  :quit                           Pause the lesson
+  .done                           Submit a multiline answer in practice mode
 
-Безпека:
-  - Жодних git fetch, commit, push, hooks або змін коду.
-  - Уривки коду надсилаються вибраному AI-провайдеру.
-  - CLI-провайдери запускаються у тимчасовій папці; прямі API-запити не запускають агентів.
-  - API-ключі беруться лише зі змінних середовища.
-  - Локально зберігаються бали, запитання та AI-еталони; твої введені відповіді не зберігаються.
+Security and privacy:
+  - Reading code does not run git fetch, commit, push, hooks, or modify the repository.
+  - Source excerpts are sent to the selected AI provider.
+  - API model calls do not receive shell tools; CLI tools launch from a temporary directory.
+  - API keys are read from environment variables, not stored by CodeGym.
+  - Local storage contains scores, AI questions, and reference answers, but not typed responses.
 "#;
 
 #[derive(Debug)]
@@ -137,11 +136,9 @@ fn args(items: &[String]) -> Result<Options, String> {
             "function" | "graph" if !command => {
                 let is_graph = items[i] == "graph";
                 i += 1;
-                let name = items
-                    .get(i)
-                    .ok_or("Після function потрібна назва функції.")?;
+                let name = items.get(i).ok_or("function requires a function name.")?;
                 if name.starts_with('-') {
-                    return Err("Некоректне ім'я функції.".into());
+                    return Err("Invalid function name.".into());
                 }
                 if is_graph {
                     result.graph_symbol = Some(name.clone());
@@ -156,7 +153,7 @@ fn args(items: &[String]) -> Result<Options, String> {
                 i += 1;
                 let value = items
                     .get(i)
-                    .ok_or_else(|| format!("Параметру {key} потрібне значення."))?;
+                    .ok_or_else(|| format!("Option {key} requires a value."))?;
                 match key {
                     "--repo" => result.repo = Some(value.clone()),
                     "--base" => result.base = Some(value.clone()),
@@ -168,17 +165,17 @@ fn args(items: &[String]) -> Result<Options, String> {
                     "--questions" => {
                         result.questions = value
                             .parse::<usize>()
-                            .map_err(|_| "--questions має бути числом 1..5")?;
+                            .map_err(|_| "--questions must be an integer from 1 to 5")?;
                         if !(1..=5).contains(&result.questions) {
-                            return Err("--questions має бути числом 1..5.".into());
+                            return Err("--questions must be an integer from 1 to 5.".into());
                         }
                     }
                     "--page" => {
                         let page = value
                             .parse::<usize>()
-                            .map_err(|_| "--page має бути числом 1..1000")?;
+                            .map_err(|_| "--page must be an integer from 1 to 1000")?;
                         if !(1..=1000).contains(&page) {
-                            return Err("--page має бути числом 1..1000.".into());
+                            return Err("--page must be an integer from 1 to 1000.".into());
                         }
                         result.page = Some(page);
                     }
@@ -187,7 +184,7 @@ fn args(items: &[String]) -> Result<Options, String> {
             }
             other => {
                 return Err(format!(
-                    "Невідома команда або параметр: {other}. Спробуй codegym help."
+                    "Unknown command or option: {other}. Run codegym help."
                 ));
             }
         }
@@ -241,11 +238,11 @@ fn ask(
             )?;
             match result {
                 tui::Action::Submit(answer) => return Ok(Answer::Response(answer)),
-                tui::Action::Hint => message = format!("Підказка: {}", question.hint),
+                tui::Action::Hint => message = format!("Hint: {}", question.hint),
                 tui::Action::Ask(query) => {
                     message = match coach.tutor(question, code, &query) {
                         Ok(reply) => format!("{} → {}", reply.explanation, reply.next_step),
-                        Err(error) => format!("AI-викладач: {error}"),
+                        Err(error) => format!("AI tutor: {error}"),
                     };
                 }
                 tui::Action::Learn => return Ok(Answer::Learn),
@@ -259,10 +256,13 @@ fn ask(
     if practice {
         if let Some(task) = &question.practice {
             println!(
-                "Напиши самодостатню чисту JavaScript-функцію {}.",
+                "Implement a self-contained pure JavaScript function named {}.",
                 task.function_name
             );
-            println!("Локальні тести: {} випадків, зокрема:", task.tests.len());
+            println!(
+                "Executable local tests: {} cases, including:",
+                task.tests.len()
+            );
             for case in task.tests.iter().take(2) {
                 println!(
                     "  {}({}) → {}",
@@ -276,14 +276,14 @@ fn ask(
                 );
             }
         }
-        println!("Введи всю функцію на JavaScript, потім окремим рядком .done");
+        println!("Enter the complete JavaScript function, then enter .done on a separate line.");
     }
     println!(
-        "Доступно: :source {} :skip :quit",
+        "Available: :source {} :skip :quit",
         if review {
             ""
         } else {
-            ":hint :learn :ask ПИТАННЯ"
+            ":hint :learn :ask QUESTION"
         }
     );
     let mut answer = String::new();
@@ -294,20 +294,20 @@ fn ask(
             return Ok(Answer::Quit);
         };
         if line == ":ask" {
-            println!("Використання: :ask чому тут потрібен await?");
+            println!("Usage: :ask why is await needed here?");
             continue;
         }
         if let Some(query) = line.strip_prefix(":ask ") {
             if review {
-                println!("У режимі review консультації вимкнені.");
+                println!("Tutoring is disabled in review mode.");
             } else {
-                println!("Пояснюю, не розкриваючи готову відповідь...");
+                println!("Providing guidance without revealing the solution...");
                 match coach.tutor(question, code, query.trim()) {
                     Ok(reply) => {
                         println!("\n{}\n", reply.explanation);
-                        println!("Спробуй: {}\n", reply.next_step);
+                        println!("Try: {}\n", reply.next_step);
                     }
-                    Err(error) => println!("Не вдалося отримати пояснення: {error}"),
+                    Err(error) => println!("Could not retrieve an explanation: {error}"),
                 }
             }
             continue;
@@ -320,7 +320,7 @@ fn ask(
                 continue;
             }
             ":hint" if !review => {
-                println!("Підказка: {}", question.hint);
+                println!("Hint: {}", question.hint);
                 continue;
             }
             ":learn" if !review => return Ok(Answer::Learn),
@@ -328,7 +328,7 @@ fn ask(
                 if !answer.trim().is_empty() {
                     return Ok(Answer::Response(answer));
                 }
-                println!("Спочатку введи код.");
+                println!("Enter your code first.");
                 continue;
             }
             _ => {}
@@ -339,7 +339,7 @@ fn ask(
         answer.push_str(&line);
         answer.push('\n');
         if answer.len() > 14_000 {
-            return Err("Відповідь надто довга.".into());
+            return Err("The answer is too long.".into());
         }
         if !practice {
             return Ok(Answer::Response(answer.trim().to_owned()));
@@ -357,11 +357,11 @@ fn review_mistakes(
     use std::collections::HashSet;
     let due = store.due_cards(repo, branch);
     if due.is_empty() {
-        println!("Немає конкретних помилок, які потрібно повторити зараз.");
+        println!("There are no missed questions due for review right now.");
         return Ok(());
     }
     println!(
-        "Повторення {} конкретних помилок без генерації нових питань.",
+        "Reviewing {} missed questions without generating new ones.",
         due.len()
     );
     let paths = due
@@ -380,12 +380,12 @@ fn review_mistakes(
     for (index, card) in due.iter().enumerate() {
         let q = &card.question;
         let Some(snippet) = evidence.display_snippet(&q.source_path, q.source_line) else {
-            println!("Пропускаю застаріле джерело: {}", q.source_path);
+            println!("Skipping outdated source: {}", q.source_path);
             continue;
         };
         if progress::source_hash(&snippet) != card.source_hash {
             println!(
-                "Код {} змінився; стара картка не використовується.",
+                "The source at {} has changed; this old review card will not be used.",
                 q.source_path
             );
             continue;
@@ -402,8 +402,8 @@ fn review_mistakes(
         let score = match answer {
             Answer::Quit => break,
             Answer::Skip | Answer::Learn => {
-                println!("Розбір: {}", q.reference_answer);
-                feedback_text = format!("Розбір (0/5)\n\n{}", q.reference_answer);
+                println!("Explanation: {}", q.reference_answer);
+                feedback_text = format!("Explanation (0/5)\n\n{}", q.reference_answer);
                 0
             }
             Answer::Response(value) => {
@@ -420,10 +420,10 @@ fn review_mistakes(
                 let score = review.score.min(cap);
                 ui::result(score, score < review.score);
                 println!("{}", review.feedback);
-                println!("Що повторити: {}", review.what_to_improve);
-                println!("Розбір: {}", review.model_answer);
+                println!("What to review: {}", review.what_to_improve);
+                println!("Explanation: {}", review.model_answer);
                 feedback_text = format!(
-                    "Оцінка {score}/5\n\n{}\n\nЩо повторити:\n{}\n\nПравильна відповідь:\n{}",
+                    "Score: {score}/5\n\n{}\n\nWhat to review:\n{}\n\nReference answer:\n{}",
                     review.feedback, review.what_to_improve, review.model_answer,
                 );
                 score
@@ -447,25 +447,25 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     if opts.show_providers {
-        println!("Підтримувані AI-провайдери:\n{}", provider::NAMES);
+        println!("Available AI providers:\n{}", provider::NAMES);
         let selected =
             provider::Provider::new(opts.provider, opts.model, opts.base_url, opts.api_key_env)?;
-        println!("\nПоточний вибір:\n{}", selected.description());
+        println!("\nCurrent selection:\n{}", selected.description());
         return Ok(());
     }
     if opts.tui && !tui::supported() {
         return Err(
-            "--tui потребує інтерактивного термінала; для pipe використай стандартний режим."
+            "--tui requires an interactive terminal. Use standard mode for pipes or redirected input."
                 .into(),
         );
     }
     let repo = git::repository(opts.repo.as_deref())?;
     if opts.semantic && opts.from.is_none() {
-        return Err("Для --semantic потрібно вказати --from src/path-to-definition.ts.".into());
+        return Err("--semantic requires --from src/path-to-definition.ts.".into());
     }
     if opts.semantic && opts.graph_symbol.is_none() && !matches!(opts.mode, StudyMode::Function(_))
     {
-        return Err("--semantic зараз підтримує лише graph та function.".into());
+        return Err("--semantic is supported only for graph and function.".into());
     }
     if let Some(symbol) = &opts.graph_symbol {
         let graph = if opts.semantic {
@@ -494,16 +494,16 @@ fn run() -> Result<(), String> {
         );
     }
     ui::banner(env!("CARGO_PKG_VERSION"), opts.mode.title());
-    println!("Репозиторій: {}", repo.display());
-    println!("Аналізую локальну історію Git...");
+    println!("Repository: {}", repo.display());
+    println!("Analyzing local Git history...");
     if opts.from.is_some() && !matches!(opts.mode, StudyMode::Function(_)) {
-        return Err("--from доступний лише з function або graph.".into());
+        return Err("--from is supported only for function and graph.".into());
     }
     if opts.page.is_some() && matches!(opts.mode, StudyMode::Function(_)) {
-        return Err("--page не використовується для function.".into());
+        return Err("--page cannot be used with function.".into());
     }
     if opts.fresh && (opts.page.is_some() || opts.inspect) {
-        return Err("--fresh не поєднується з --page або inspect.".into());
+        return Err("--fresh cannot be combined with --page or inspect.".into());
     }
     let branch = git::current_branch(&repo)?;
     let mode_name = match &opts.mode {
@@ -518,7 +518,7 @@ fn run() -> Result<(), String> {
     };
     if opts.fresh && !opts.inspect && opts.page.is_none() {
         session::Session::clear_for(&repo, &branch, &mode_name)?;
-        println!("Старе незавершене заняття скасовано.");
+        println!("The unfinished lesson has been discarded.");
     }
     // Explicit --page runs a one-off lesson without overwriting any unfinished
     // automatic lesson. Inspect never writes/consumes pending sessions.
@@ -561,10 +561,10 @@ fn run() -> Result<(), String> {
             opts.semantic,
         )?;
         signature = session::evidence_signature(&repo, &evidence)?;
-        println!("Попереднє заняття застаріло — згенерую нове за поточним кодом.");
+        println!("The saved lesson is outdated; generating a new one using current code.");
     }
     println!(
-        "Гілка: {} · база: {} · файлів-кандидатів: {}",
+        "Branch: {} | base: {} | candidate files: {}",
         evidence.branch,
         evidence.base,
         evidence.paths.len()
@@ -573,30 +573,30 @@ fn run() -> Result<(), String> {
         print!("{}", evidence.overview);
         let mut files = evidence.paths.iter().collect::<Vec<_>>();
         files.sort();
-        println!("Відібрані файли (без відправлення коду в AI):");
+        println!("Selected files (without sending code to AI):");
         for file in files {
             println!("  {file}");
         }
-        println!("Обсяг контексту: {} байтів.", evidence.context.len());
+        println!("Context size: {} bytes.", evidence.context.len());
         return Ok(());
     }
     let coach = Coach::new(opts.provider, opts.model, opts.base_url, opts.api_key_env)?;
     let mut lesson = if let Some(pending) = resumed.take() {
         println!(
-            "Відновлено заняття з питання {} із {} — без повторного виклику AI.",
+            "Resumed lesson at question {} of {} without another AI request.",
             pending.next + 1,
             pending.questions.len()
         );
         pending
     } else {
         println!(
-            "Генерую {} питань через {}...",
+            "Generating {} questions using {}...",
             opts.questions,
             coach.provider.description()
         );
         let weak_topics = progress.weak_topics(&repo);
         if !weak_topics.is_empty() {
-            println!("Повторимо слабкі теми: {}", weak_topics.join(", "));
+            println!("Reviewing weak topics: {}", weak_topics.join(", "));
         }
         let questions = coach.questions(&evidence, opts.questions, &weak_topics)?;
         let lesson = session::Session::new(&repo, &branch, &mode_name, page, signature, questions);
@@ -612,7 +612,7 @@ fn run() -> Result<(), String> {
         lesson
     };
     println!(
-        "Підготовлено {} питань. Відповідай українською.",
+        "Prepared {} questions. Answer in English.",
         lesson.questions.len()
     );
     let mut scores = Vec::new();
@@ -638,20 +638,20 @@ fn run() -> Result<(), String> {
         let score = match answer {
             Answer::Quit => {
                 if opts.page.is_none() {
-                    println!("Заняття призупинено. Наступний запуск продовжить із цього питання.");
+                    println!("Lesson paused. The next run will resume from this question.");
                 } else {
-                    println!("Заняття завершено. Урок з --page не зберігається для відновлення.");
+                    println!("Lesson ended. Explicit --page lessons cannot be resumed.");
                 }
                 break;
             }
             Answer::Skip => {
-                println!("Пропущено. Розбір: {}", q.reference_answer);
-                feedback_text = format!("Пропущено (0/5)\n\nРозбір:\n{}", q.reference_answer);
+                println!("Skipped. Explanation: {}", q.reference_answer);
+                feedback_text = format!("Skipped (0/5)\n\nExplanation:\n{}", q.reference_answer);
                 0
             }
             Answer::Learn => {
-                println!("Розбір: {}", q.reference_answer);
-                feedback_text = format!("Навчальний розбір (0/5)\n\n{}", q.reference_answer);
+                println!("Explanation: {}", q.reference_answer);
+                feedback_text = format!("Learning explanation (0/5)\n\n{}", q.reference_answer);
                 0
             }
             Answer::Response(answer) => {
@@ -661,43 +661,43 @@ fn run() -> Result<(), String> {
                     && let Some(report) = syntax::check(&q.source_path, &answer)
                 {
                     if report.issues.is_empty() {
-                        println!("Локальна TS/TSX перевірка: синтаксичних помилок не знайдено.");
+                        println!("Local TS/TSX syntax check: no syntax errors found.");
                     } else {
-                        println!("Локальна TS/TSX перевірка: можливі синтаксичні помилки:");
+                        println!("Local TS/TSX syntax check: possible syntax errors:");
                         for issue in &report.issues {
-                            println!("  рядок {}: {}", issue.line, issue.kind);
+                            println!("  line {}: {}", issue.line, issue.kind);
                         }
                         println!(
-                            "Це перевірка синтаксису, не TypeScript typecheck і не запуск тестів."
+                            "This is a syntax check, not a TypeScript type check or test execution."
                         );
                     }
                     if report.checked_as_block {
-                        println!("Фрагмент перевірено як тіло функції.");
+                        println!("Snippet was checked as a function body.");
                     }
                 }
                 if matches!(&evidence.mode, StudyMode::Practice)
                     && let Some(task) = &q.practice
                 {
-                    println!("Запускаю чисту функцію в ізольованому QuickJS (16 МБ, 750 мс)...");
+                    println!("Running pure function in isolated QuickJS (16 MB, 750 ms)...");
                     match runner::run(&answer, task) {
                         Ok(result) => {
                             let passed = result.passed();
-                            println!("Тести: {passed}/{} пройдено.", result.results.len());
+                            println!("Tests: {passed}/{} passed.", result.results.len());
                             test_note.push_str(&format!(
-                                "Тести QuickJS: {passed}/{}\n",
+                                "QuickJS tests: {passed}/{}\n",
                                 result.results.len()
                             ));
                             for (idx, case) in result.results.iter().enumerate() {
                                 if !case.passed {
                                     test_note.push_str(&format!(
-                                        "Тест {}: очікувалось {}, отримано {} {}\n",
+                                        "Test {}: expected {}, received {} {}\n",
                                         idx + 1,
                                         case.expected,
                                         case.actual,
                                         case.error
                                     ));
                                     println!(
-                                        "  Тест {}: очікувалось {}, отримано {}{}",
+                                        "  Test {}: expected {}, received {}{}",
                                         idx + 1,
                                         case.expected,
                                         case.actual,
@@ -714,21 +714,21 @@ fn run() -> Result<(), String> {
                             }
                         }
                         Err(error) => {
-                            println!("Тести не запустилися або спрацював ліміт: {error}");
-                            test_note = format!("Тести QuickJS: {error}\n");
+                            println!("Tests could not run or a limit was reached: {error}");
+                            test_note = format!("QuickJS tests: {error}\n");
                             test_score_cap = 0;
                         }
                     }
                 }
-                println!("Оцінюю відповідь...");
+                println!("Evaluating the answer...");
                 let result = coach.evaluate(q, &snippet, &answer)?;
                 let score = result.score.min(test_score_cap);
                 ui::result(score, score < result.score);
                 println!("{}", result.feedback);
-                println!("Що повторити: {}", result.what_to_improve);
-                println!("Розбір: {}", result.model_answer);
+                println!("What to review: {}", result.what_to_improve);
+                println!("Explanation: {}", result.model_answer);
                 feedback_text = format!(
-                    "Оцінка: {score}/5\n\n{test_note}\n{}\n\nЩо повторити:\n{}\n\nПравильна відповідь:\n{}",
+                    "Score: {score}/5\n\n{test_note}\n{}\n\nWhat to review:\n{}\n\nReference answer:\n{}",
                     result.feedback, result.what_to_improve, result.model_answer,
                 );
                 score
@@ -750,25 +750,25 @@ fn run() -> Result<(), String> {
             }
         }
         if opts.tui && !tui::show_feedback(&q.topic, &feedback_text)? {
-            println!("Заняття призупинено після збереження відповіді.");
+            println!("Lesson paused after saving the answer.");
             break;
         }
     }
     if !scores.is_empty() {
         let sum = scores.iter().map(|s| u32::from(*s)).sum::<u32>();
         println!(
-            "\nПідсумок: {} відповідей, середній бал {:.2}/5",
+            "\nSummary: {} answers, average score {:.2}/5",
             scores.len(),
             sum as f64 / scores.len() as f64
         );
-        println!("Прогрес: codegym progress");
+        println!("Progress: codegym progress");
     }
     Ok(())
 }
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("Помилка CodeGym: {err}");
+        eprintln!("CodeGym error: {err}");
         std::process::exit(1);
     }
 }
@@ -776,6 +776,38 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distributed_text_and_prompts_are_english_only() {
+        // Catch accidental reintroduction of Cyrillic in UI, prompts or docs.
+        let distributed = [
+            include_str!("../README.md"),
+            include_str!("../CHANGELOG.md"),
+            include_str!("../tests/english_e2e.py"),
+            include_str!("main.rs"),
+            include_str!("coach.rs"),
+            include_str!("git.rs"),
+            include_str!("graph.rs"),
+            include_str!("imports.rs"),
+            include_str!("progress.rs"),
+            include_str!("provider.rs"),
+            include_str!("runner.rs"),
+            include_str!("semantic.rs"),
+            include_str!("session.rs"),
+            include_str!("syntax.rs"),
+            include_str!("ui.rs"),
+            include_str!("tui.rs"),
+            include_str!("ts_semantic.cjs"),
+        ];
+        for (index, source) in distributed.iter().enumerate() {
+            assert!(
+                !source
+                    .chars()
+                    .any(|character| ('\u{0400}'..='\u{052f}').contains(&character)),
+                "Non-English source text in distributed file #{index}"
+            );
+        }
+    }
     #[test]
     fn default_mode() {
         let opts = args(&[]).unwrap();

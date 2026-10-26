@@ -229,11 +229,11 @@ pub fn analyze_scoped(root: &Path, symbol: &str, defined_in: &str) -> Result<Gra
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
     {
-        return Err("Некоректна назва символу.".into());
+        return Err("Invalid symbol name.".into());
     }
     let root = fs::canonicalize(root).map_err(|e| e.to_string())?;
     let Some(definition_path) = safe_file(&root, defined_in) else {
-        return Err("Файл визначення не існує або його небезпечно читати.".into());
+        return Err("The definition file does not exist or cannot be read safely.".into());
     };
     let code = fs::read_to_string(definition_path).map_err(|e| e.to_string())?;
     let definitions = parse_source(defined_in, &code, symbol)
@@ -241,7 +241,9 @@ pub fn analyze_scoped(root: &Path, symbol: &str, defined_in: &str) -> Result<Gra
         .filter(|h| h.kind == Kind::Definition)
         .collect::<Vec<_>>();
     if definitions.is_empty() {
-        return Err(format!("У {defined_in} не знайдено визначення {symbol}."));
+        return Err(format!(
+            "Definition of {symbol} was not found in {defined_in}."
+        ));
     }
     let result = Command::new("git")
         .current_dir(&root)
@@ -249,7 +251,7 @@ pub fn analyze_scoped(root: &Path, symbol: &str, defined_in: &str) -> Result<Gra
         .output()
         .map_err(|e| e.to_string())?;
     if !result.status.success() || result.stdout.len() > 2_000_000 {
-        return Err("Не вийшло прочитати обмежений список Git-файлів.".into());
+        return Err("Could not read the bounded list of Git-tracked files.".into());
     }
     let tracked = result
         .stdout
@@ -258,7 +260,7 @@ pub fn analyze_scoped(root: &Path, symbol: &str, defined_in: &str) -> Result<Gra
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
     if !tracked.contains(&defined_in) {
-        return Err("Визначення функції повинно бути відстежуваним Git-файлом.".into());
+        return Err("The function definition must be in a Git-tracked file.".into());
     }
     let mut graph = Graph {
         scoped: true,
@@ -394,9 +396,9 @@ pub fn related_callers(root: &Path, changed: &[String]) -> Related {
                 continue;
             }
             related.summary.push_str(&format!(
-                "Функція {symbol} із {declared_in} викликається через відносний іменований імпорт з {}:{}{} (локальне затінення не перевірено).\n",
+                "Function {symbol} from {declared_in} is called through a relative named import at {}:{}{} (local shadowing was not checked).\n",
                 hit.path, hit.line,
-                hit.owner.as_deref().map_or(String::new(), |v| format!(" у {v}"))
+                hit.owner.as_deref().map_or(String::new(), |v| format!(" in {v}"))
             ));
             related.hits.push(hit);
             if related.hits.len() >= 3 {
@@ -414,20 +416,20 @@ pub fn analyze(root: &Path, symbol: &str) -> Result<Graph, String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
     {
-        return Err("Назва функції містить неприпустимі символи.".into());
+        return Err("Function name contains invalid characters.".into());
     }
     let root = fs::canonicalize(root)
-        .map_err(|error| format!("Не можу визначити корінь репозиторію: {error}"))?;
+        .map_err(|error| format!("Could not determine repository root: {error}"))?;
     let result = Command::new("git")
         .current_dir(&root)
         .args(["ls-files", "-z", "--", "*.ts", "*.tsx"])
         .output()
         .map_err(|e| format!("Git ls-files: {e}"))?;
     if !result.status.success() {
-        return Err("Не вдалося отримати Git-відстежувані TypeScript-файли.".into());
+        return Err("Could not list Git-tracked TypeScript files.".into());
     }
     if result.stdout.len() > 2_000_000 {
-        return Err("Надто багато файлів для обмеженого аналізу.".into());
+        return Err("Too many files for bounded analysis.".into());
     }
     let names = result
         .stdout
@@ -495,26 +497,28 @@ impl Graph {
 
     pub fn description(&self, symbol: &str) -> String {
         let mut out = format!(
-            "{} TypeScript/TSX символу {symbol}; перевірено {} файлів.\n",
+            "{} for TypeScript/TSX symbol {symbol}; scanned {} files.\n",
             if self.semantic {
-                "Семантичний TypeScript type-checker"
+                "Semantic TypeScript type checking"
             } else {
-                "Синтаксичний аналіз"
+                "Syntax analysis"
             },
             self.scanned
         );
         if self.semantic {
-            out.push_str("Посилання зіставлені TypeScript type-checker (імпорти, реекспорти, шляхи tsconfig). Динамічні виклики можуть залишитися невідомими.\n");
+            out.push_str("References resolved by the TypeScript type checker (imports, re-exports, tsconfig paths). Dynamic calls may remain unknown.\n");
         } else if self.scoped {
-            out.push_str("Звірено прямі іменовані відносні імпорти; реекспорти, типи й затінення не розв'язано.\n");
+            out.push_str("Direct relative named imports verified; re-exports, types, and shadowing are unresolved.\n");
         } else {
-            out.push_str("Це кандидати за ім'ям, а не гарантована розв'язка імпортів/типів.\n");
+            out.push_str(
+                "Matches are name-based candidates, not guaranteed import/type resolution.\n",
+            );
         }
         for hit in &self.hits {
             let kind = if hit.kind == Kind::Definition {
-                "оголошення"
+                "declaration"
             } else {
-                "виклик"
+                "call"
             };
             out.push_str(&format!(
                 "  {}:{} — {kind}{}\n",
@@ -522,11 +526,11 @@ impl Graph {
                 hit.line,
                 hit.owner
                     .as_deref()
-                    .map_or(String::new(), |v| format!(" із {v}")),
+                    .map_or(String::new(), |v| format!(" from {v}")),
             ));
         }
         if self.truncated {
-            out.push_str("Зріз обмежений: результати можуть бути неповні.\n");
+            out.push_str("Scope is bounded; results may be incomplete.\n");
         }
         out
     }
@@ -666,7 +670,7 @@ mod tests {
             semantic: false,
         };
         let desc = graph.description("foo");
-        assert!(desc.contains("не гарантована"));
-        assert!(desc.contains("обмежений"));
+        assert!(desc.contains("not guaranteed"));
+        assert!(desc.contains("bounded"));
     }
 }

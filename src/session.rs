@@ -17,6 +17,8 @@ pub struct Session {
     pub evidence_hash: u64,
     pub next: usize,
     pub questions: Vec<Question>,
+    #[serde(default)]
+    pub language: String,
 }
 
 fn directory() -> Result<PathBuf, String> {
@@ -29,7 +31,7 @@ fn directory() -> Result<PathBuf, String> {
                 std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
             })
     }
-    .ok_or("Не знайдено папку локального профілю.")?;
+    .ok_or("Local user profile directory was not found.")?;
     Ok(root.join("codegym").join("sessions"))
 }
 
@@ -57,7 +59,7 @@ pub fn evidence_signature(repo: &Path, evidence: &Evidence) -> Result<u64, Strin
             .output()
             .map_err(|e| e.to_string())?;
         if !output.status.success() || output.stdout.len() > 1_000_000 {
-            return Err("Не вдалося перевірити Git-стан для відновлення заняття.".into());
+            return Err("Could not verify Git state for session recovery.".into());
         }
         output.stdout.hash(&mut hasher);
     }
@@ -81,6 +83,7 @@ impl Session {
             evidence_hash,
             next: 0,
             questions,
+            language: crate::progress::LESSON_LANGUAGE.into(),
         }
     }
 
@@ -89,13 +92,13 @@ impl Session {
         let content = match fs::read_to_string(&file) {
             Ok(value) => value,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(format!("Не можу прочитати заняття: {err}")),
+            Err(err) => return Err(format!("Could not read saved lesson: {err}")),
         };
         if content.len() > 250_000 {
-            return Err("Збережене заняття надто велике.".into());
+            return Err("Saved lesson is too large.".into());
         }
         let session: Session = serde_json::from_str(&content)
-            .map_err(|err| format!("Пошкоджений локальний файл заняття: {err}"))?;
+            .map_err(|err| format!("Saved lesson file is corrupt: {err}"))?;
         if session.repo != repo.to_string_lossy()
             || session.branch != branch
             || session.mode != mode
@@ -108,6 +111,7 @@ impl Session {
     pub fn matches(&self, page: usize, signature: u64) -> bool {
         self.page == page
             && self.evidence_hash == signature
+            && self.language == crate::progress::LESSON_LANGUAGE
             && !self.questions.is_empty()
             && self.next < self.questions.len()
             && self.questions.len() <= 5
@@ -115,7 +119,7 @@ impl Session {
 
     pub fn save(&self, repo: &Path) -> Result<(), String> {
         let file = location(repo, &self.branch, &self.mode)?;
-        let parent = file.parent().ok_or("Не знайдено каталог для заняття.")?;
+        let parent = file.parent().ok_or("Lesson directory was not found.")?;
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         let tmp = parent.join(format!("session-{}.tmp", std::process::id()));
         fs::write(
@@ -125,7 +129,7 @@ impl Session {
         .map_err(|e| e.to_string())?;
         fs::rename(&tmp, &file).map_err(|e| {
             let _ = fs::remove_file(&tmp);
-            format!("Не вдалося оновити заняття: {e}")
+            format!("Could not update saved lesson: {e}")
         })
     }
 
@@ -139,7 +143,7 @@ impl Session {
         match fs::remove_file(file) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(format!("Не можу очистити завершене заняття: {err}")),
+            Err(err) => Err(format!("Could not clear completed lesson: {err}")),
         }
     }
 }
@@ -151,12 +155,12 @@ mod tests {
     #[test]
     fn session_signature_check_and_serialization() {
         let questions = vec![Question {
-            topic: "Логіка".into(),
-            question: "Що поверне ця функція?".into(),
+            topic: "Logic".into(),
+            question: "What does this function return?".into(),
             source_path: "src/file.ts".into(),
             source_line: 3,
-            reference_answer: "Число".into(),
-            hint: "Перевір return".into(),
+            reference_answer: "A number".into(),
+            hint: "Check the return statement".into(),
             practice: None,
         }];
         let repo = Path::new("/temp/repo");
@@ -170,6 +174,27 @@ mod tests {
         let restored: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.next, 1);
         assert_eq!(restored.questions[0].source_line, 3);
+    }
+
+    #[test]
+    fn legacy_sessions_cannot_resurface_non_english_questions() {
+        let repo = Path::new("/repo");
+        let question = Question {
+            topic: "Logic".into(),
+            question: "What does it do?".into(),
+            source_path: "a.ts".into(),
+            source_line: 1,
+            reference_answer: "It returns the input".into(),
+            hint: "Read the return statement".into(),
+            practice: None,
+        };
+        let session = Session::new(repo, "feature", "feature", 1, 42, vec![question]);
+        let mut old = serde_json::to_value(&session).unwrap();
+        old.as_object_mut().unwrap().remove("language");
+        let restored: Session = serde_json::from_value(old).unwrap();
+        assert_eq!(restored.language, "");
+        assert!(!restored.matches(1, 42));
+        assert!(session.matches(1, 42));
     }
 
     #[test]
@@ -193,12 +218,12 @@ mod tests {
         );
         let repo = PathBuf::from(unique);
         let question = Question {
-            topic: "Логіка".into(),
-            question: "Що поверне?".into(),
+            topic: "Logic".into(),
+            question: "What does it return?".into(),
             source_path: "example.ts".into(),
             source_line: 1,
-            reference_answer: "Число".into(),
-            hint: "Дивись return".into(),
+            reference_answer: "A number".into(),
+            hint: "Look at the return statement".into(),
             practice: None,
         };
         let mut session = Session::new(

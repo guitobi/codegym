@@ -42,9 +42,9 @@ fn collect(node: Node<'_>, offset: usize, issues: &mut Vec<Issue>) {
                 .saturating_sub(offset)
                 .max(1),
             kind: if node.is_missing() {
-                format!("очікується {}", node.kind())
+                format!("expected {}", node.kind())
             } else {
-                "некоректна конструкція".into()
+                "invalid syntax construct".into()
             },
         });
         // A single ERROR node may contain many nested errors; report it once.
@@ -71,7 +71,7 @@ pub fn check(path: &str, input: &str) -> Option<Report> {
         return Some(Report {
             issues: vec![Issue {
                 line: 1,
-                kind: "порожній або надто довгий код".into(),
+                kind: "empty or excessively long code".into(),
             }],
             checked_as_block: false,
         });

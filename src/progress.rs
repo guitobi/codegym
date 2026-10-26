@@ -7,6 +7,30 @@ use std::path::{Path, PathBuf};
 
 const DAY: u64 = 86_400;
 const REVIEW_DAYS: [u64; 5] = [1, 3, 7, 14, 30];
+pub const LESSON_LANGUAGE: &str = "en";
+
+fn legacy_topic(name: &str) -> &str {
+    match name {
+        "\u{410}\u{440}\u{445}\u{456}\u{442}\u{435}\u{43a}\u{442}\u{443}\u{440}\u{430}" => {
+            "Architecture"
+        }
+        "\u{412}\u{438}\u{43a}\u{43b}\u{438}\u{43a}\u{438}" => "Call Graph",
+        "\u{41b}\u{43e}\u{433}\u{456}\u{43a}\u{430}" => "Logic",
+        "\u{414}\u{430}\u{43d}\u{456}" => "Data",
+        "\u{422}\u{438}\u{43f}\u{438}" => "Types",
+        "\u{41f}\u{440}\u{430}\u{43a}\u{442}\u{438}\u{43a}\u{430}" => "Practice",
+        "\u{411}\u{435}\u{437}\u{43f}\u{435}\u{43a}\u{430}" => "Security",
+        _ => name,
+    }
+}
+
+fn migrated_topic_key(key: &str) -> String {
+    if let Some((repo, topic)) = key.rsplit_once(" | ") {
+        format!("{repo} | {}", legacy_topic(topic))
+    } else {
+        key.to_owned()
+    }
+}
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct TopicProgress {
@@ -30,6 +54,8 @@ pub struct MemoryCard {
     pub next_due: u64,
     pub streak: u32,
     pub attempts: u32,
+    #[serde(default)]
+    pub language: String,
 }
 
 pub fn source_hash(code: &str) -> u64 {
@@ -56,7 +82,7 @@ fn data_file() -> Result<PathBuf, String> {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|v| PathBuf::from(v).join(".local/share")))
     }
-    .ok_or_else(|| "Не можу визначити локальну папку для прогресу.".to_string())?;
+    .ok_or_else(|| "Could not locate the local progress directory.".to_string())?;
     Ok(root.join("codegym").join("progress.json"))
 }
 
@@ -103,6 +129,7 @@ impl Store {
             next_due: timestamp,
             streak: 0,
             attempts: 0,
+            language: LESSON_LANGUAGE.into(),
         });
         card.attempts = card.attempts.saturating_add(1);
         card.source_hash = source_hash(snippet);
@@ -131,6 +158,7 @@ impl Store {
             .filter(|card| {
                 card.repo == repo.to_string_lossy()
                     && card.branch == branch
+                    && card.language == LESSON_LANGUAGE
                     && card.next_due <= timestamp
             })
             .cloned()
@@ -197,9 +225,31 @@ impl Store {
             });
         }
         let content = fs::read_to_string(&file)
-            .map_err(|err| format!("Не можу прочитати {}: {err}", file.display()))?;
-        serde_json::from_str(&content)
-            .map_err(|err| format!("Пошкоджено файл прогресу: {err}. Не переписую його."))
+            .map_err(|err| format!("Could not read {}: {err}", file.display()))?;
+        let mut store: Self = serde_json::from_str(&content).map_err(|err| {
+            format!("Progress file is corrupt: {err}. It will not be overwritten.")
+        })?;
+        store.migrate_topics();
+        Ok(store)
+    }
+
+    fn migrate_topics(&mut self) {
+        let old = std::mem::take(&mut self.topics);
+        for (name, item) in old {
+            let entry = self.topics.entry(migrated_topic_key(&name)).or_default();
+            let was_empty = entry.attempts == 0;
+            entry.attempts = entry.attempts.saturating_add(item.attempts);
+            entry.total_points = entry.total_points.saturating_add(item.total_points);
+            entry.successful = entry.successful.saturating_add(item.successful);
+            entry.last_practiced = entry.last_practiced.max(item.last_practiced);
+            if was_empty {
+                entry.correct_streak = item.correct_streak;
+                entry.next_due = item.next_due;
+            } else {
+                entry.correct_streak = entry.correct_streak.min(item.correct_streak);
+                entry.next_due = entry.next_due.min(item.next_due);
+            }
+        }
     }
 
     pub fn record(&mut self, repo: &Path, topic: &str, score: u8) {
@@ -207,7 +257,7 @@ impl Store {
     }
 
     fn record_at(&mut self, repo: &Path, topic: &str, score: u8, timestamp: u64) {
-        let key = format!("{} | {topic}", repo.display());
+        let key = format!("{} | {}", repo.display(), legacy_topic(topic));
         let item = self.topics.entry(key).or_default();
         item.attempts += 1;
         item.total_points += score.min(5) as u32;
@@ -226,14 +276,14 @@ impl Store {
 
     pub fn save(&self) -> Result<(), String> {
         let file = data_file()?;
-        let directory = file.parent().ok_or("Не знайдено папку прогресу")?;
+        let directory = file.parent().ok_or("Progress directory was not found")?;
         fs::create_dir_all(directory).map_err(|err| err.to_string())?;
         let temporary = directory.join(format!("progress-{}.tmp", std::process::id()));
         let json = serde_json::to_vec_pretty(self).map_err(|err| err.to_string())?;
         fs::write(&temporary, json).map_err(|err| err.to_string())?;
         if let Err(err) = fs::rename(&temporary, &file) {
             let _ = fs::remove_file(&temporary);
-            return Err(format!("Не вдалося зберегти прогрес: {err}"));
+            return Err(format!("Could not save progress: {err}"));
         }
         Ok(())
     }
@@ -243,7 +293,7 @@ impl Store {
         let mut total = 0;
         let mut earned = 0;
         let current = now();
-        println!("\nПрогрес для {}", repo.display());
+        println!("\nProgress for {}", repo.display());
         for (name, item) in self
             .topics
             .iter()
@@ -257,37 +307,38 @@ impl Store {
                 item.total_points as f64 * 20.0 / item.attempts as f64
             };
             println!(
-                "  {:<32} {:>3} відповідей · {:>5.1}% · {} засвоєно · {}",
+                "  {:<32} {:>3} answers · {:>5.1}% · {} mastered · {}",
                 name.strip_prefix(&prefix).unwrap_or(name),
                 item.attempts,
                 accuracy,
                 item.successful,
                 if item.next_due == 0 {
-                    "ще не заплановано".to_owned()
+                    "not scheduled".to_owned()
                 } else if item.next_due <= current {
-                    "повторити зараз".to_owned()
+                    "due now".to_owned()
                 } else {
-                    format!(
-                        "повторити через {} дн.",
-                        (item.next_due - current).div_ceil(DAY)
-                    )
+                    format!("due in {} days", (item.next_due - current).div_ceil(DAY))
                 }
             );
         }
         if total == 0 {
-            println!("  Ще немає відповідей. Запусти: codegym");
+            println!("  No answers yet. Run: codegym");
         } else {
             println!(
-                "  Разом: {total} відповідей, середній бал {:.2}/5",
+                "  Total: {total} answers, average score {:.2}/5",
                 earned as f64 / total as f64
             );
         }
         let due = self
             .cards
             .values()
-            .filter(|c| c.repo == repo.to_string_lossy() && c.next_due <= current)
+            .filter(|c| {
+                c.repo == repo.to_string_lossy()
+                    && c.language == LESSON_LANGUAGE
+                    && c.next_due <= current
+            })
             .count();
-        println!("  Карток помилок до повторення: {due}. Запуск: codegym mistakes");
+        println!("  Missed-question cards due: {due}. Run: codegym mistakes");
     }
 }
 
@@ -326,27 +377,45 @@ mod tests {
     fn recommends_weak_topics_only() {
         let repo = Path::new("/repo");
         let mut store = Store::default();
-        store.record(repo, "Виклики", 1);
-        store.record(repo, "Архітектура", 5);
-        store.record(Path::new("/another"), "Безпека", 0);
-        assert_eq!(store.weak_topics(repo), vec!["Виклики"]);
+        store.record(repo, "\u{412}\u{438}\u{43a}\u{43b}\u{438}\u{43a}\u{438}", 1);
+        store.record(
+            repo,
+            "\u{410}\u{440}\u{445}\u{456}\u{442}\u{435}\u{43a}\u{442}\u{443}\u{440}\u{430}",
+            5,
+        );
+        store.record(
+            Path::new("/another"),
+            "\u{411}\u{435}\u{437}\u{43f}\u{435}\u{43a}\u{430}",
+            0,
+        );
+        assert_eq!(store.weak_topics(repo), vec!["Call Graph"]);
     }
 
     #[test]
     fn schedules_increasing_review_intervals_and_resets_on_failure() {
         let repo = Path::new("/repo");
         let mut store = Store::default();
-        store.record_at(repo, "Логіка", 5, 1000);
+        store.record_at(repo, "\u{41b}\u{43e}\u{433}\u{456}\u{43a}\u{430}", 5, 1000);
         let item = store.topics.values().next().unwrap();
         assert_eq!(item.correct_streak, 1);
         assert_eq!(item.next_due, 1000 + DAY);
         assert!(store.weak_topics_at(repo, 1000).is_empty());
-        assert_eq!(store.weak_topics_at(repo, 1000 + DAY), vec!["Логіка"]);
-        store.record_at(repo, "Логіка", 4, 1000 + DAY);
+        assert_eq!(store.weak_topics_at(repo, 1000 + DAY), vec!["Logic"]);
+        store.record_at(
+            repo,
+            "\u{41b}\u{43e}\u{433}\u{456}\u{43a}\u{430}",
+            4,
+            1000 + DAY,
+        );
         let item = store.topics.values().next().unwrap();
         assert_eq!(item.correct_streak, 2);
         assert_eq!(item.next_due, 1000 + 4 * DAY);
-        store.record_at(repo, "Логіка", 1, 1000 + 4 * DAY);
+        store.record_at(
+            repo,
+            "\u{41b}\u{43e}\u{433}\u{456}\u{43a}\u{430}",
+            1,
+            1000 + 4 * DAY,
+        );
         let item = store.topics.values().next().unwrap();
         assert_eq!(item.correct_streak, 0);
         assert_eq!(item.next_due, 1000 + 4 * DAY);
@@ -354,12 +423,65 @@ mod tests {
 
     #[test]
     fn old_progress_files_without_schedule_fields_still_load() {
-        let old = r#"{"version":1,"topics":{"/repo | Логіка":{"attempts":1,"total_points":4,"successful":1,"last_practiced":1234}}}"#;
-        let store: Store = serde_json::from_str(old).unwrap();
+        let old = r#"{"version":1,"topics":{"/repo | \u041b\u043e\u0433\u0456\u043a\u0430":{"attempts":1,"total_points":4,"successful":1,"last_practiced":1234}}}"#;
+        let mut store: Store = serde_json::from_str(old).unwrap();
+        store.migrate_topics();
         let item = store.topics.values().next().unwrap();
         assert_eq!(item.correct_streak, 0);
         assert_eq!(item.next_due, 0);
         assert!(store.lesson_pages.is_empty());
+        assert!(store.topics.contains_key("/repo | Logic"));
+    }
+
+    #[test]
+    fn migration_merges_legacy_and_english_topics_without_losing_scores() {
+        let mut store = Store::default();
+        store.record_at(Path::new("/repo"), "Logic", 4, 1000);
+        let saved_key = "/repo | Logic";
+        let legacy_key = format!("/repo | {}", "\u{41b}\u{43e}\u{433}\u{456}\u{43a}\u{430}");
+        store.topics.insert(
+            legacy_key,
+            TopicProgress {
+                attempts: 2,
+                total_points: 6,
+                successful: 1,
+                last_practiced: 950,
+                correct_streak: 0,
+                next_due: 950,
+            },
+        );
+        store.migrate_topics();
+        assert_eq!(store.topics.len(), 1);
+        let item = &store.topics[saved_key];
+        assert_eq!(
+            (item.attempts, item.total_points, item.successful),
+            (3, 10, 2)
+        );
+        assert_eq!(item.last_practiced, 1000);
+        assert_eq!(item.next_due, 950);
+        store.migrate_topics();
+        assert_eq!(store.topics[saved_key].attempts, 3);
+    }
+
+    #[test]
+    fn archived_non_english_cards_are_preserved_but_not_assigned() {
+        let repo = Path::new("/repo");
+        let q = Question {
+            topic: "Logic".into(),
+            question: "Why?".into(),
+            source_path: "src/code.ts".into(),
+            source_line: 1,
+            reference_answer: "Reason".into(),
+            hint: "Check the caller".into(),
+            practice: None,
+        };
+        let mut store = Store::default();
+        store.remember_at(repo, "feature", &q, "some source code", 1, 100);
+        let key = Store::card_key(repo, "feature", &q);
+        let card = store.cards.get_mut(&key).unwrap();
+        card.language.clear(); // Missing language in older serialized cards.
+        assert!(store.due_cards_at(repo, "feature", 100).is_empty());
+        assert!(store.cards.contains_key(&key));
     }
 
     #[test]
@@ -380,11 +502,12 @@ mod tests {
     fn remembers_specific_failed_question_and_repeats_until_mastered() {
         let repo = Path::new("/repo");
         let q = Question {
-            topic: "Виклики".into(),
-            question: "Навіщо await?".into(),
+            topic: "\u{412}\u{438}\u{43a}\u{43b}\u{438}\u{43a}\u{438}".into(),
+            question: "\u{41d}\u{430}\u{432}\u{456}\u{449}\u{43e} await?".into(),
             source_path: "src/code.ts".into(),
             source_line: 3,
-            reference_answer: "Очікування".into(),
+            reference_answer:
+                "\u{41e}\u{447}\u{456}\u{43a}\u{443}\u{432}\u{430}\u{43d}\u{43d}\u{44f}".into(),
             hint: "Promise".into(),
             practice: None,
         };

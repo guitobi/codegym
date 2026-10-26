@@ -4,7 +4,7 @@ CodeGym is a lightweight, local Rust CLI trainer inspired by the interactive exp
 
 It provides syntax-aware code excerpts, progress indicators, and optional full-screen lessons built with Ratatui. The regular line-oriented interface remains available for simple terminals, accessibility tools, and automation.
 
-**Language policy:** This README and source-code comments are in English. Lessons, questions, hints, evaluations, and the CLI user interface are intentionally in **Ukrainian**.
+**Language policy:** CodeGym ships in **English end to end**: README, source comments, CLI/TUI, diagnostics, AI instructions, generated questions, hints, grading, tutoring, and new learning progress. The output language is English regardless of the selected AI provider.
 
 ## Requirements and installation
 
@@ -169,6 +169,7 @@ The QuickJS runtime exposes no host file-system, networking, shell, or project-a
 
 - **Low overhead by default:** the Rust CLI has no browser window, background daemon, application server, or database service. CLI providers start on demand; HTTP providers use a direct client. External AI processes and local models can consume substantial RAM.
 - **Local data:** `%LOCALAPPDATA%\codegym\progress.json` stores progress statistics **and missed-question cards with question text and model answers**. `%LOCALAPPDATA%\codegym\sessions` stores unfinished lessons. Your typed answers are not persisted, but model answers can include excerpts from proprietary code. Treat these files as confidential.
+- **Upgrade from Ukrainian builds:** Existing per-topic statistics and spaced-repetition schedules are migrated to English topic labels when loaded and saved (historical results are preserved). Already generated Ukrainian review cards are retained in the local progress JSON for archival purposes but are excluded from new English reviews; newly missed questions create English cards. Unfinished older-language sessions are invalidated on the next lesson to prevent Ukrainian prompts from returning. Back up your local `codegym` data directory if you may need the old questions.
 - **AI data disclosure:** selected code excerpts are sent to your selected AI provider. Follow your organization's policies before using CodeGym on private or corporate repositories.
 - **Source filters:** hidden files, dependency/build directories, and filenames containing `secret` or `credential` are excluded by the source collector. These exclusions **do not guarantee** that other files are free from secrets and are not a DLP solution.
 - **Provider isolation:** CodeGym does not give direct API models any local tools or filesystem access. CLI models are launched from a temporary directory and configured to limit agent tools, but their own clients may still have access to user-level settings and credentials. Source evidence is passed as text; the target repository is not mounted as their workspace.
@@ -187,4 +188,4 @@ cargo build --release --locked
 
 The GitHub Actions workflow builds and tests on Windows and Linux, including a TypeScript semantic-resolution fixture.
 
-**Scope and limitations:** CodeGym provides all planned core learning workflows, including architectural/code questions, self-written code exercises, reviews, individual error repetition, session recovery, optional full-screen lessons, and optional semantic TypeScript references. It is not a full IDE/LSP, and static analysis cannot establish every possible runtime call. Automated tests and CI passing do not replace hands-on user acceptance testing of the terminal interface.
+**Scope and release readiness:** CodeGym supports architectural/code questions, self-written code exercises, reviews, per-question spaced repetition, session recovery, optional full-screen lessons, and optional semantic TypeScript references. Automated tests include a source-wide English-only regression check and legacy-progress compatibility checks. It is not a full IDE/LSP, and static analysis cannot establish every possible runtime call. External AI APIs and an interactive TUI still require acceptance testing with real service credentials and a real terminal before any production-readiness claim. A passing CI run alone does not guarantee a production-ready service.

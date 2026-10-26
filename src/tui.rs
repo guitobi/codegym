@@ -139,7 +139,7 @@ pub fn prompt(view: Prompt<'_>, state: &mut Editor) -> Result<Action, String> {
         message,
     } = view;
     if !supported() {
-        return Err("Повноекранний режим потребує інтерактивного термінала Windows Terminal або TTY. Без нього запускай без --tui.".into());
+        return Err("Full-screen mode requires an interactive Windows Terminal or TTY. Otherwise, run without --tui.".into());
     }
     enable_raw_mode().map_err(|e| e.to_string())?;
     let _screen = Screen;
@@ -155,51 +155,81 @@ pub fn prompt(view: Prompt<'_>, state: &mut Editor) -> Result<Action, String> {
                     Constraint::Percentage(20),
                     Constraint::Min(5),
                     Constraint::Length(6),
-                ]).split(frame.area());
+                ])
+                .split(frame.area());
             let header = Paragraph::new(Line::from(vec![
-                Span::styled(" ◆ CodeGym ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " ◆ CodeGym ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  •  "),
                 Span::styled(topic, Style::default().fg(Color::Yellow)),
                 Span::raw("  •  "),
                 Span::styled(location, Style::default().fg(Color::Gray)),
-            ])).block(Block::default().borders(Borders::ALL).title(" Тренажер коду "));
+            ]))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Code Trainer "),
+            );
             frame.render_widget(header, vertical[0]);
             let code = Paragraph::new(source)
-                .block(Block::default().borders(Borders::ALL).title(" Реальний код — PgUp/PgDn "))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Real Source Code — PgUp/PgDn "),
+                )
                 .style(Style::default().fg(Color::LightCyan))
                 .wrap(Wrap { trim: false })
                 .scroll((state.code_scroll, 0));
             frame.render_widget(code, vertical[1]);
             let prompt = Paragraph::new(question)
-                .block(Block::default().borders(Borders::ALL).title(" Питання "))
+                .block(Block::default().borders(Borders::ALL).title(" Question "))
                 .wrap(Wrap { trim: false });
             frame.render_widget(prompt, vertical[2]);
             let (body, label) = if state.asking {
-                (state.ask.as_str(), " Запитання викладачу • Enter = запитати ")
+                (state.ask.as_str(), " Ask the tutor • Enter = send ")
             } else if practice {
-                (state.answer.as_str(), " Твоя функція • Enter = новий рядок, F5 = перевірити ")
+                (
+                    state.answer.as_str(),
+                    " Your function • Enter = newline, F5 = submit ",
+                )
             } else {
-                (state.answer.as_str(), " Твоя відповідь • Enter або F5 = перевірити ")
+                (
+                    state.answer.as_str(),
+                    " Your answer • Enter or F5 = submit ",
+                )
             };
-            let entered = if body.is_empty() { Text::raw("Пиши тут…") } else { Text::raw(body) };
+            let entered = if body.is_empty() {
+                Text::raw("Type here…")
+            } else {
+                Text::raw(body)
+            };
             let visible_lines = vertical[3].height.saturating_sub(2) as usize;
             let input_scroll = body.lines().count().saturating_sub(visible_lines) as u16;
             frame.render_widget(
-                Paragraph::new(entered).block(Block::default().borders(Borders::ALL).title(label))
-                    .wrap(Wrap { trim: false }).scroll((input_scroll, 0)),
-                vertical[3]
+                Paragraph::new(entered)
+                    .block(Block::default().borders(Borders::ALL).title(label))
+                    .wrap(Wrap { trim: false })
+                    .scroll((input_scroll, 0)),
+                vertical[3],
             );
             let shortcuts = if review {
-                "F4 пропустити  •  F5 відповісти  •  Esc вийти"
+                "F4 skip  •  F5 submit  •  Esc exit"
             } else {
-                "F1 підказка  •  F2 запитати AI  •  F3 розбір  •  F4 пропуск  •  F5 перевірити  •  Esc"
+                "F1 hint  •  F2 ask AI  •  F3 explain  •  F4 skip  •  F5 submit  •  Esc"
             };
             let footer = Paragraph::new(vec![
                 Line::from(Span::styled(shortcuts, Style::default().fg(Color::Green))),
                 Line::from(message.chars().take(240).collect::<String>()),
-            ]).block(Block::default().borders(Borders::ALL)).wrap(Wrap { trim: false });
+            ])
+            .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
             frame.render_widget(footer, vertical[4]);
-        }).map_err(|e| format!("Помилка малювання термінала: {e}"))?;
+        })
+        .map_err(|e| format!("Terminal rendering error: {e}"))?;
 
         if event::poll(Duration::from_millis(200)).map_err(|e| e.to_string())? {
             match event::read().map_err(|e| e.to_string())? {
@@ -232,7 +262,7 @@ pub fn prompt(view: Prompt<'_>, state: &mut Editor) -> Result<Action, String> {
 /// Enter continues; Esc ends the current lesson after progress is saved.
 pub fn show_feedback(topic: &str, explanation: &str) -> Result<bool, String> {
     if !supported() {
-        return Err("Підсумок у TUI потребує інтерактивного термінала.".into());
+        return Err("Full-screen feedback requires an interactive terminal.".into());
     }
     enable_raw_mode().map_err(|e| e.to_string())?;
     let _screen = Screen;
@@ -261,7 +291,7 @@ pub fn show_feedback(topic: &str, explanation: &str) -> Result<bool, String> {
                         .block(
                             Block::default()
                                 .borders(Borders::ALL)
-                                .title(" Результат заняття "),
+                                .title(" Lesson Result "),
                         ),
                     sections[0],
                 );
@@ -272,15 +302,13 @@ pub fn show_feedback(topic: &str, explanation: &str) -> Result<bool, String> {
                         .block(
                             Block::default()
                                 .borders(Borders::ALL)
-                                .title(" Оцінка, пояснення та правильна відповідь "),
+                                .title(" Score, explanation and reference answer "),
                         ),
                     sections[1],
                 );
                 frame.render_widget(
-                    Paragraph::new(
-                        "Enter — наступне питання   PgUp/PgDn — прокрутка   Esc — завершити урок",
-                    )
-                    .block(Block::default().borders(Borders::ALL)),
+                    Paragraph::new("Enter — next question   PgUp/PgDn — scroll   Esc — end lesson")
+                        .block(Block::default().borders(Borders::ALL)),
                     sections[2],
                 );
             })

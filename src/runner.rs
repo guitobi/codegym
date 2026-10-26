@@ -56,11 +56,11 @@ pub fn validate(spec: &Spec) -> Result<(), String> {
         || spec.tests.len() < 2
         || spec.tests.len() > 8
     {
-        return Err("Практичне завдання має містити коректну назву функції і 2–8 тестів.".into());
+        return Err("The coding exercise must specify a valid function name and 2–8 tests.".into());
     }
     let cases = serde_json::to_vec(&spec.tests).map_err(|e| e.to_string())?;
     if cases.len() > 8_192 || spec.tests.iter().any(|case| case.input.len() > 6) {
-        return Err("Надто великі тестові випадки.".into());
+        return Err("Test cases are too large.".into());
     }
     Ok(())
 }
@@ -68,7 +68,7 @@ pub fn validate(spec: &Spec) -> Result<(), String> {
 pub fn run(source: &str, spec: &Spec) -> Result<Outcome, String> {
     validate(spec)?;
     if source.len() > LIMIT_BYTES || source.trim().is_empty() {
-        return Err("Код повинен містити від 1 до 14 000 байтів.".into());
+        return Err("Submitted code must contain between 1 and 14,000 bytes.".into());
     }
     let tests = serde_json::to_string(&spec.tests).map_err(|e| e.to_string())?;
     let rt = Runtime::new().map_err(|e| format!("QuickJS: {e}"))?;
@@ -135,7 +135,7 @@ pub fn run(source: &str, spec: &Spec) -> Result<Outcome, String> {
                 ));
             }
         };
-        serde_json::from_str(&data).map_err(|e| format!("Некоректний результат QuickJS: {e}"))
+        serde_json::from_str(&data).map_err(|e| format!("Invalid QuickJS result: {e}"))
     })
 }
 

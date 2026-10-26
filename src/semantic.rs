@@ -23,7 +23,7 @@ pub fn analyze(repo: &Path, symbol: &str, definition: &str) -> Result<Graph, Str
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
     {
-        return Err("Некоректний символ TypeScript.".into());
+        return Err("Invalid TypeScript symbol.".into());
     }
     let repo = fs::canonicalize(repo).map_err(|e| e.to_string())?;
     let output = Command::new("git")
@@ -32,7 +32,7 @@ pub fn analyze(repo: &Path, symbol: &str, definition: &str) -> Result<Graph, Str
         .output()
         .map_err(|e| format!("Git: {e}"))?;
     if !output.status.success() || output.stdout.len() > 2_000_000 {
-        return Err("Занадто великий або недоступний список Git TypeScript-файлів.".into());
+        return Err("Git-tracked TypeScript file list is too large or unavailable.".into());
     }
     let files = output
         .stdout
@@ -51,7 +51,7 @@ pub fn analyze(repo: &Path, symbol: &str, definition: &str) -> Result<Graph, Str
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     if !files.iter().any(|v| v == definition) {
-        return Err("Визначення відсутнє серед Git-відстежуваних TS/TSX-файлів.".into());
+        return Err("Definition is not among Git-tracked TS/TSX files.".into());
     }
     let root_file = repo.join(definition);
     let metadata = fs::symlink_metadata(&root_file).map_err(|e| e.to_string())?;
@@ -61,7 +61,7 @@ pub fn analyze(repo: &Path, symbol: &str, definition: &str) -> Result<Graph, Str
             .map_err(|e| e.to_string())?
             .starts_with(&repo)
     {
-        return Err("Небезпечний шлях до вихідного файлу.".into());
+        return Err("Unsafe source file path.".into());
     }
 
     let input = serde_json::to_vec(&serde_json::json!({
@@ -81,13 +81,13 @@ pub fn analyze(repo: &Path, symbol: &str, definition: &str) -> Result<Graph, Str
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Не вдалося запустити Node для TypeScript type-checker: {e}"))?;
+        .map_err(|e| format!("Could not start Node for TypeScript type checking: {e}"))?;
     if let Some(mut stdin) = child.stdin.take()
         && let Err(e) = stdin.write_all(&input)
     {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(format!("Помилка надсилання списку файлів: {e}"));
+        return Err(format!("Could not send file list: {e}"));
     }
     let started = Instant::now();
     loop {
@@ -98,7 +98,7 @@ pub fn analyze(repo: &Path, symbol: &str, definition: &str) -> Result<Graph, Str
             let _ = child.kill();
             let _ = child.wait();
             return Err(
-                "TypeScript type-checker перевищив ліміт 35 секунд. Використай звичайний graph."
+                "TypeScript type checking exceeded the 35-second timeout. Use the standard graph command."
                     .into(),
             );
         }
@@ -115,10 +115,10 @@ pub fn analyze(repo: &Path, symbol: &str, definition: &str) -> Result<Graph, Str
         ));
     }
     if result.stdout.len() > 120_000 {
-        return Err("TypeScript повернув надто великий граф.".into());
+        return Err("TypeScript returned an oversized call graph.".into());
     }
     let response: Response = serde_json::from_slice(&result.stdout)
-        .map_err(|e| format!("Некоректний граф TypeScript: {e}"))?;
+        .map_err(|e| format!("Invalid TypeScript call graph: {e}"))?;
     let allowed = files.into_iter().collect::<HashSet<_>>();
     let hits = response
         .hits

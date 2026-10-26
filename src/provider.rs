@@ -114,12 +114,12 @@ impl Provider {
             .unwrap_or_else(|| "codex".into())
             .to_ascii_lowercase();
         let (kind, model_default, url_default, key_default) = preset(&name)
-            .ok_or_else(|| format!("Невідомий провайдер {name}. Варіанти: {NAMES}"))?;
+            .ok_or_else(|| format!("Unknown provider {name}. Supported providers: {NAMES}"))?;
         let model = model
             .or_else(|| std::env::var("CODEGYM_MODEL").ok())
             .unwrap_or_else(|| model_default.into());
         if model.trim().is_empty() || model.len() > 160 || model.contains(['\r', '\n']) {
-            return Err(format!("Для {name} вкажи --model."));
+            return Err(format!("Specify --model for {name}."));
         }
         let url = url
             .or_else(|| std::env::var("CODEGYM_BASE_URL").ok())
@@ -137,7 +137,7 @@ impl Provider {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_'))
         {
-            return Err("Некоректна назва змінної середовища API-ключа.".into());
+            return Err("Invalid API key environment variable name.".into());
         }
         Ok(Self {
             kind,
@@ -168,17 +168,17 @@ impl Provider {
             )
         };
         format!(
-            "Провайдер: {} | модель: {} | {} | API key: {}",
+            "Provider: {} | model: {} | {} | API key: {}",
             self.name, self.model, source, secret
         )
     }
 
     pub fn generate(&self, prompt: &str, schema: &str) -> Result<String, String> {
         if prompt.len() > 120_000 {
-            return Err("Запит до AI надто великий.".into());
+            return Err("AI request is too large.".into());
         }
         let schema: Value =
-            serde_json::from_str(schema).map_err(|e| format!("Некоректна JSON-схема: {e}"))?;
+            serde_json::from_str(schema).map_err(|e| format!("Invalid JSON schema: {e}"))?;
         let response = match self.kind {
             Kind::Codex | Kind::ClaudeCli | Kind::GeminiCli => self.cli(prompt, &schema)?,
             Kind::Compatible | Kind::Anthropic | Kind::Gemini => self.http(prompt, &schema)?,
@@ -220,7 +220,7 @@ impl Provider {
                 }
                 .into()
             }),
-            _ => return Err("Некоректний CLI-провайдер.".into()),
+            _ => return Err("Invalid CLI provider.".into()),
         };
         let mut command = Command::new(bin);
         command.current_dir(dir);
@@ -307,7 +307,7 @@ impl Provider {
             ));
         let mut child = command.spawn().map_err(|e| {
             format!(
-                "Не вдалося запустити {} CLI ({e}). Перевір встановлення й авторизацію.",
+                "Could not start {} CLI ({e}). Check installation and authentication.",
                 self.name
             )
         })?;
@@ -316,7 +316,7 @@ impl Provider {
         {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("Помилка надсилання запиту в CLI: {e}"));
+            return Err(format!("Could not send request to CLI: {e}"));
         }
         let start = Instant::now();
         let exit = loop {
@@ -327,7 +327,7 @@ impl Provider {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
-                    "{} перевищив ліміт {} секунд.",
+                    "{} exceeded the {}-second timeout.",
                     self.name,
                     TIMEOUT.as_secs()
                 ));
@@ -336,7 +336,7 @@ impl Provider {
         };
         if !exit.success() {
             return Err(format!(
-                "{} CLI повернув помилку ({exit}): {}",
+                "{} CLI returned an error ({exit}): {}",
                 self.name,
                 read_limited(&stderr_path, 550).unwrap_or_default()
             ));
@@ -346,7 +346,7 @@ impl Provider {
         }
         let stdout = read_limited(&stdout_path, MAX_REPLY)?;
         let response: Value = serde_json::from_str(&stdout)
-            .map_err(|_| format!("{} CLI повернув некоректний JSON.", self.name))?;
+            .map_err(|_| format!("{} CLI returned invalid JSON.", self.name))?;
         let path = if self.kind == Kind::ClaudeCli {
             "result"
         } else {
@@ -356,7 +356,7 @@ impl Provider {
             .get(path)
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .ok_or_else(|| format!("{} CLI не повернув поле {path}.", self.name))
+            .ok_or_else(|| format!("{} CLI did not return the {path} field.", self.name))
     }
 
     fn http(&self, prompt: &str, schema: &Value) -> Result<String, String> {
@@ -365,7 +365,7 @@ impl Provider {
         } else {
             Some(std::env::var(&self.key_env).map_err(|_| {
                 format!(
-                    "Установи змінну середовища {} для {}.",
+                    "Set the {} environment variable for {}.",
                     self.key_env, self.name
                 )
             })?)
@@ -402,7 +402,7 @@ impl Provider {
                         "responseSchema":schema}}),
                 "x-goog-api-key",
             ),
-            _ => return Err("Некоректний HTTP-провайдер.".into()),
+            _ => return Err("Invalid HTTP provider.".into()),
         };
         if self.name == "openai" {
             data["response_format"] = json!({
@@ -438,12 +438,12 @@ impl Provider {
             Ok(response) => response,
             Err(ureq::Error::Status(code, _)) => {
                 return Err(format!(
-                    "{} API: HTTP {code}. Перевір модель, ключ і параметри.",
+                    "{} API: HTTP {code}. Check model, credentials and request parameters.",
                     self.name
                 ));
             }
             Err(ureq::Error::Transport(err)) => {
-                return Err(format!("{} API недоступний: {err}", self.name));
+                return Err(format!("{} API is unavailable: {err}", self.name));
             }
         };
         let mut bytes = Vec::new();
@@ -453,32 +453,34 @@ impl Provider {
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
         if bytes.len() as u64 > MAX_REPLY {
-            return Err("AI-відповідь надто велика.".into());
+            return Err("AI response is too large.".into());
         }
         let response: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| "AI API повернув некоректний JSON.".to_owned())?;
+            .map_err(|_| "AI API returned invalid JSON.".to_owned())?;
         extract_response(self.kind, &response)
     }
 }
 
 fn validate_url(input: &str) -> Result<(), String> {
     if input.len() > 2000 || input.contains(['\r', '\n', '?', '#', '@']) {
-        return Err("Некоректний --base-url.".into());
+        return Err("Invalid --base-url.".into());
     }
-    let url = url::Url::parse(input).map_err(|_| "Некоректна адреса API.".to_owned())?;
+    let url = url::Url::parse(input).map_err(|_| "Invalid API URL.".to_owned())?;
     let local = matches!(
         url.host_str().unwrap_or(""),
         "127.0.0.1" | "localhost" | "::1" | "[::1]"
     );
     if url.scheme() != "https" && !(local && url.scheme() == "http") {
-        return Err("Віддалені API потребують HTTPS; HTTP дозволено лише для localhost.".into());
+        return Err(
+            "Remote API endpoints must use HTTPS; HTTP is allowed only on localhost.".into(),
+        );
     }
     Ok(())
 }
 
 fn read_limited(path: &Path, limit: u64) -> Result<String, String> {
     if fs::metadata(path).map_err(|e| e.to_string())?.len() > limit {
-        return Err("AI CLI повернув надто великий результат.".into());
+        return Err("AI CLI returned an oversized response.".into());
     }
     fs::read_to_string(path).map_err(|e| e.to_string())
 }
@@ -495,7 +497,7 @@ fn extract_response(kind: Kind, json: &Value) -> Result<String, String> {
         _ => None,
     };
     text.map(str::to_owned)
-        .ok_or("Провайдер не повернув текст результату.".into())
+        .ok_or("Provider did not return response text.".into())
 }
 
 fn normalize_json(input: &str) -> Result<String, String> {
@@ -512,10 +514,11 @@ fn normalize_json(input: &str) -> Result<String, String> {
         input
     };
     let value: Value = serde_json::from_str(clean).map_err(|_| {
-        "Модель повернула невалідний JSON; обери модель, що вміє повертати JSON.".to_owned()
+        "The model returned invalid JSON. Choose a model that supports structured JSON output."
+            .to_owned()
     })?;
     if !value.is_object() {
-        return Err("AI має повернути JSON-об'єкт.".into());
+        return Err("AI must return a JSON object.".into());
     }
     Ok(value.to_string())
 }

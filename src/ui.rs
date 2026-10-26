@@ -30,7 +30,7 @@ pub fn question_heading(current: usize, total: usize, topic: &str, path: &str, l
     println!();
     println!(
         "  {} {}  {}  {}",
-        style(format!("Питання {current}/{total}")).cyan().bold(),
+        style(format!("Question {current}/{total}")).cyan().bold(),
         style(dots(current.saturating_sub(1), total)).yellow(),
         style(topic).bold(),
         style(format!("{path}:{line}")).dim()
@@ -39,14 +39,13 @@ pub fn question_heading(current: usize, total: usize, topic: &str, path: &str, l
 }
 
 pub fn code_block(text: &str) {
-    println!("  {}", style("КОД ІЗ РЕПОЗИТОРІЮ").dim());
+    println!("  {}", style("REPOSITORY CODE").dim());
     for line in text.lines() {
         if let Some((number, code)) = line.split_once(" | ")
             && number.trim().parse::<usize>().is_ok()
         {
             println!("  {} │ {}", style(number).cyan().dim(), code);
-        } else if line.starts_with("ПОВ'ЯЗАНИЙ ФАЙЛ") || line.starts_with("ФАЙЛ:")
-        {
+        } else if line.starts_with("RELATED FILE") || line.starts_with("FILE:") {
             println!("  {}", style(line).magenta().bold());
         } else {
             println!("  {line}");
@@ -59,9 +58,9 @@ pub fn question_prompt(text: &str, practice: bool) {
     println!(
         "  {}",
         style(if practice {
-            "НАПИШИ КОД"
+            "WRITE CODE"
         } else {
-            "РОЗБЕРИ І ПОЯСНИ"
+            "TRACE AND EXPLAIN"
         })
         .yellow()
         .bold()
@@ -76,20 +75,20 @@ pub fn result(score: u8, capped: bool) {
     if score >= 4 {
         println!(
             "  {} {}",
-            style("◆ РЕЗУЛЬТАТ").green().bold(),
+            style("◆ RESULT").green().bold(),
             style(label).green()
         );
     } else {
         println!(
             "  {} {}",
-            style("◆ РЕЗУЛЬТАТ").yellow().bold(),
+            style("◆ RESULT").yellow().bold(),
             style(label).yellow()
         );
     }
     if capped {
         println!(
             "  {}",
-            style("Оцінку обмежено результатами виконуваних тестів").dim()
+            style("Score capped by executable test results").dim()
         );
     }
 }

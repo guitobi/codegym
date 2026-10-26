@@ -18,10 +18,10 @@ pub enum StudyMode {
 impl StudyMode {
     pub fn title(&self) -> &'static str {
         match self {
-            Self::Feature => "Архітектура та код фічі",
-            Self::Function(_) => "Функція та ланцюжок викликів",
-            Self::Practice => "Практичне програмування",
-            Self::Review => "Незалежна перевірка знань",
+            Self::Feature => "Feature architecture and source code",
+            Self::Function(_) => "Function and call chain",
+            Self::Practice => "Coding practice",
+            Self::Review => "Independent knowledge assessment",
         }
     }
 
@@ -89,7 +89,7 @@ impl Evidence {
         if let Some(related) = other.first()
             && let Some(snippet) = self.display_snippet(related, 1)
         {
-            context.push_str(&format!("\nПОВ'ЯЗАНИЙ ФАЙЛ: {related}\n{snippet}"));
+            context.push_str(&format!("\nRELATED FILE: {related}\n{snippet}"));
         }
         context
     }
@@ -104,7 +104,7 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
         .current_dir(root)
         .args(args)
         .output()
-        .map_err(|error| format!("Не вдалося запустити git: {error}"))?;
+        .map_err(|error| format!("Could not run Git: {error}"))?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -113,7 +113,7 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
         ));
     }
     if output.stdout.len() > MAX_GIT_OUTPUT {
-        return Err("Git повернув забагато даних; звузь вибірку.".into());
+        return Err("Git returned too much data; narrow the scope.".into());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -126,7 +126,7 @@ pub fn repository(path: Option<&str>) -> Result<PathBuf, String> {
     };
     let root = git(&cwd, &["rev-parse", "--show-toplevel"])?;
     let root = PathBuf::from(root.trim());
-    fs::canonicalize(&root).map_err(|err| format!("Не можу відкрити репозиторій: {err}"))
+    fs::canonicalize(&root).map_err(|err| format!("Cannot open repository: {err}"))
 }
 
 pub fn current_branch(root: &Path) -> Result<String, String> {
@@ -307,7 +307,7 @@ fn read_excerpt(root: &Path, path: &str, center: usize) -> Option<String> {
     let center = center.saturating_sub(1).min(lines.len() - 1);
     let from = center.saturating_sub(8);
     let to = (from + 32).min(lines.len());
-    let mut out = format!("ФАЙЛ: {path}; фрагмент рядків {}..{to}\n", from + 1);
+    let mut out = format!("FILE: {path}; excerpt lines {}..{to}\n", from + 1);
     for (i, row) in lines.iter().enumerate().take(to).skip(from) {
         out.push_str(&format!(
             "{:>5} | {}\n",
@@ -325,7 +325,7 @@ fn branch_and_base(
     let branch = git(root, &["branch", "--show-current"])?.trim().to_string();
     let candidates: Vec<&str> = if let Some(base) = requested_base {
         if base.starts_with('-') || base.len() > 180 {
-            return Err("Некоректний --base.".into());
+            return Err("Invalid --base value.".into());
         }
         vec![base]
     } else {
@@ -341,7 +341,7 @@ fn branch_and_base(
             .is_ok()
         })
         .ok_or_else(|| {
-            "Не знайдено базову гілку. Передай --base main або іншу локальну Git-ref.".to_string()
+            "Base branch not found. Specify --base main or another local Git ref.".to_string()
         })?;
     let merge_base = git(root, &["merge-base", "HEAD", base])?;
     Ok((branch, base.to_owned(), merge_base.trim().to_owned()))
@@ -369,7 +369,7 @@ fn verify_symbol(symbol: &str) -> Result<(), String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
     {
-        return Err("Для function вкажи просте ім'я функції (літери, цифри, _ або $).".into());
+        return Err("For function, provide a simple identifier (letters, digits, _ or $).".into());
     }
     Ok(())
 }
@@ -385,7 +385,7 @@ fn function_sources(
         crate::semantic::analyze(
             root,
             symbol,
-            defined_in.ok_or("--semantic потребує --from")?,
+            defined_in.ok_or("--semantic requires --from")?,
         )?
     } else if let Some(file) = defined_in {
         crate::graph::analyze_scoped(root, symbol, file)?
@@ -401,7 +401,7 @@ fn function_sources(
         Ok(output) => output,
         Err(error) if error.contains("Git:") => {
             return Err(format!(
-                "Не знайдено використань функції {symbol} в Git-файлах."
+                "No uses of {symbol} were found in Git-tracked files."
             ));
         }
         Err(error) => return Err(error),
@@ -431,7 +431,7 @@ fn function_sources(
         }
     }
     if files.is_empty() {
-        return Err(format!("Не знайдено використань функції {symbol}."));
+        return Err(format!("No uses of {symbol} were found."));
     }
     Ok((files, refs))
 }
@@ -456,7 +456,7 @@ pub fn gather(
         _ => {
             let files = changed_files(repo, &ancestor)?;
             if files.is_empty() {
-                return Err("Немає змін відносно базової гілки. Спробуй codegym function <назва> або --base HEAD~1.".into());
+                return Err("No changes relative to the base branch. Try codegym function NAME or --base HEAD~1.".into());
             }
             let full = files.len();
             let pages = full.div_ceil(14);
@@ -464,7 +464,7 @@ pub fn gather(
             (
                 choose_files(files, 14, page),
                 format!(
-                    "Файлів зі змінами: {full}; сторінка {chosen_page}/{pages}; вибірка охоплює різні шари системи.\n"
+                    "Changed files: {full}; page {chosen_page}/{pages}; sampling covers different architectural layers.\n"
                 ),
             )
         }
@@ -474,7 +474,7 @@ pub fn gather(
     if !matches!(mode, StudyMode::Function(_)) {
         let related = crate::graph::related_callers(repo, &files);
         if !related.hits.is_empty() {
-            overview.push_str("\nМОЖЛИВІ ВИКЛИКИ З НЕЗМІНЕНИХ ФАЙЛІВ:\n");
+            overview.push_str("\nPOSSIBLE CALLS FROM UNCHANGED FILES:\n");
             overview.push_str(&related.summary);
             let mut position = files.len().min(7);
             for hit in related.hits {
@@ -488,7 +488,7 @@ pub fn gather(
         }
     }
     let mut context = format!(
-        "РЕЖИМ: {}\nГілка: {branch}\nБаза: {base} (merge-base {ancestor})\n{overview}\n",
+        "MODE: {}\nBranch: {branch}\nBase: {base} (merge-base {ancestor})\n{overview}\n",
         mode.title()
     );
     let summary = context.clone();
@@ -536,7 +536,7 @@ pub fn gather(
         }
     }
     if paths.is_empty() {
-        return Err("Не вдалося прочитати вихідний код вибраних файлів.".into());
+        return Err("Could not read the selected source files.".into());
     }
     Ok(Evidence {
         root: repo.to_owned(),
@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn prioritizes_real_call_location_for_import_aliases() {
-        let summary = "  src/a.ts:8 — оголошення\n  src/caller.tsx:420 — виклик із Render";
+        let summary = "  src/a.ts:8 — declaration\n  src/caller.tsx:420 — call from Render";
         assert_eq!(graph_line(summary, "src/caller.tsx"), Some(420));
         assert_eq!(graph_line(summary, "src/a.ts"), Some(8));
         assert_eq!(graph_line(summary, "src/unseen.ts"), None);

@@ -25,6 +25,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Install TypeScript for semantic resolver tests
         run: npm install -g typescript@6.0.3
       - name: Resolve TypeScript compiler location
@@ -38,5 +41,9 @@ jobs:
         run: cargo test --locked
         env:
           CODEGYM_SEMANTIC_TESTS: "1"
+      - name: Build test executable
+        run: cargo build --locked
+      - name: English-only end-to-end learning session
+        run: python tests/english_e2e.py
       - name: Release build
         run: cargo build --release --locked
